@@ -1,0 +1,14 @@
+services:
+  agent:
+    build: .
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - API_KEY=your-api-key
+      # Optional
+      # - KAFKA_SASL_MECHANISM=SCRAM-SHA-512
+      # - KAFKA_SASL_USERNAME=user
+      # - KAFKA_SASL_PASSWORD=pass
+      # - KAFKA_TLS_ENABLED=true
+      # - COLLECTION_INTERVAL=30s
+      # - LOG_LEVEL=info
+    restart: unless-stopped
