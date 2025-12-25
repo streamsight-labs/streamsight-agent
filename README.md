@@ -234,3 +234,44 @@ Every 30 seconds:
 docker build -t kafka-metrics-agent .
 docker run -e KAFKA_BROKERS=broker:9092 -e API_KEY=key kafka-metrics-agent
 ```
+
+## Local Testing
+
+Test with SASL/ACLs enabled locally:
+
+```bash
+make test-local-up     # Start Kafka (KRaft) + agent
+make test-local-logs   # Watch agent output
+make test-local-down   # Stop and cleanup
+```
+
+## Roadmap
+
+### Additional Data Collection (Admin API)
+
+| Feature | API | Dashboard Value |
+|---------|-----|-----------------|
+| **Transactions** | `ListTransactions`, `DescribeTransactions` | Stuck/zombie producers, abort rate |
+| **Log Dirs** | `DescribeLogDirs` | Disk usage per broker |
+| **Configs** | `DescribeConfigs` | Detect risky topic/broker settings |
+| **Reassignments** | `ListPartitionReassignments` | Ongoing partition moves |
+| **Quotas** | `DescribeClientQuotas` | Throttled clients |
+
+### Derived Metrics (computed in backend from current data)
+
+| Metric | Source | Dashboard Value |
+|--------|--------|-----------------|
+| **Consumer lag** | `end_offset - committed_offset` | How far behind consumers are |
+| **Under-replicated partitions** | `len(ISR) < len(replicas)` | Replication health |
+| **Offline partitions** | `leader == -1` | Data unavailable |
+| **Partition skew** | Leader distribution across brokers | Load balancing issues |
+| **Empty consumer groups** | `member_count == 0` | Abandoned/orphan groups |
+| **Lag velocity** | Lag change over time | Is consumer catching up or falling behind |
+
+### Not Available via Admin API
+
+These require JMX or Kafka's metrics endpoint:
+- Request latency (p99, p95)
+- Bytes in/out per broker
+- CPU/memory usage
+- Network utilization

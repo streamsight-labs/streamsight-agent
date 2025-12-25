@@ -12,4 +12,17 @@ test:
 clean:
 	rm -rf bin/
 
-.PHONY: build run test clean
+# Local test environment with SASL/ACLs
+test-local-up:
+	cd test && docker-compose up -d
+
+test-local-down:
+	cd test && docker-compose down -v
+
+test-local-logs:
+	cd test && docker-compose logs -f agent
+
+test-local-restart:
+	cd test && docker-compose restart agent
+
+.PHONY: build run test clean test-local-up test-local-down test-local-logs test-local-restart
