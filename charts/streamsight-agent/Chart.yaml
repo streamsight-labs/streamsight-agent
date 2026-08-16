@@ -1,6 +1,19 @@
 apiVersion: v2
 name: streamsight-agent
-description: Kafka metrics collection agent
+description: Kafka metrics collection agent -- samples cluster, topic, consumer group and offset metrics and exports them as JSONL
 type: application
-version: 0.1.0
+keywords:
+  - kafka
+  - metrics
+  - monitoring
+  - consumer-lag
+home: https://github.com/streamsight-labs/streamsight-agent
+sources:
+  - https://github.com/streamsight-labs/streamsight-agent
+# Chart version. Bump on every change to the chart itself.
+version: 0.2.0
+# Default image tag. .github/workflows/docker.yml publishes
+# ghcr.io/streamsight-labs/streamsight-agent:<version> from a v<version> tag,
+# so this must name a tag that has actually been released -- override
+# image.tag until then.
 appVersion: "0.1.0"

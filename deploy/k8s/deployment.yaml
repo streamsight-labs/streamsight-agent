@@ -1,11 +1,24 @@
+# Apply the whole directory; the ConfigMap and Secret must exist before the
+# pod starts, and `kubectl apply -f deploy/k8s/` handles that.
+#
+#   kubectl apply -f deploy/k8s/
+#
+# For a templated, configurable install use charts/streamsight-agent instead.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: streamsight-agent
   labels:
     app: streamsight-agent
+    app.kubernetes.io/name: streamsight-agent
+    app.kubernetes.io/component: metrics-agent
+    app.kubernetes.io/part-of: streamsight
 spec:
   replicas: 1
+  # The agent is a singleton collector: a surge pod would collect and export
+  # the whole cluster a second time for the length of the rollout.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: streamsight-agent
@@ -14,17 +27,45 @@ spec:
       labels:
         app: streamsight-agent
     spec:
+      # The agent never calls the Kubernetes API.
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        # Gives uid 1000 write access to the emptyDir volumes below.
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: agent
-          image: ghcr.io/streamsight/agent:latest
+          # Published by .github/workflows/docker.yml. Pin a released tag
+          # rather than tracking :latest in anything you care about.
+          image: ghcr.io/streamsight-labs/streamsight-agent:latest
+          imagePullPolicy: IfNotPresent
           envFrom:
+            - configMapRef:
+                name: streamsight-agent
             - secretRef:
                 name: streamsight-agent
           env:
-            - name: COLLECTION_INTERVAL
-              value: "30s"
-            - name: LOG_LEVEL
-              value: "info"
+            # The agent's own default is hostname + a per-boot random suffix,
+            # which would look like a brand new agent to the backend after
+            # every container restart. The pod name is stable across restarts.
+            - name: AGENT_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            # readOnlyRootFilesystem stays on, so this emptyDir is the only
+            # writable path in the container. EXPORT_FILE in the ConfigMap
+            # points inside it; the volume lives and dies with the pod, which
+            # makes file mode a smoke test rather than durable storage.
+            - name: data
+              mountPath: /var/lib/streamsight
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               memory: "64Mi"
@@ -33,9 +74,19 @@ spec:
               memory: "128Mi"
               cpu: "100m"
           securityContext:
-            runAsNonRoot: true
-            runAsUser: 1000
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
-      securityContext:
-        fsGroup: 1000
+            capabilities:
+              drop:
+                - ALL
+          # No probes: the agent exposes no HTTP server. It exits non-zero on
+          # an unrecoverable error and the kubelet restarts it.
+      volumes:
+        - name: data
+          emptyDir:
+            # Keep above EXPORT_FILE_MAX_MB * (EXPORT_FILE_MAX_BACKUPS + 1)
+            # or the kubelet can evict the pod mid-rotation.
+            sizeLimit: 1Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi

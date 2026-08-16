@@ -1,0 +1,37 @@
+streamsight-agent {{ .Chart.AppVersion }} installed as {{ include "streamsight-agent.fullname" . }}.
+
+  Brokers:  {{ .Values.kafka.brokers }}
+  Interval: {{ .Values.collection.interval }}
+  Export:   {{ .Values.export.mode }}{{ if eq .Values.export.mode "http" }} -> {{ .Values.export.http.endpoint }}{{ else if eq .Values.export.mode "file" }} -> {{ .Values.export.file.path }}{{ end }}
+
+Follow the agent's own logs (they go to stderr, always):
+
+  kubectl --namespace {{ .Release.Namespace }} logs -l app.kubernetes.io/instance={{ .Release.Name }} -f
+
+{{- if eq .Values.export.mode "file" }}
+
+Batches are written to an emptyDir, one JSON object per line. The volume lives
+and dies with the pod, so this mode is for smoke-testing the collector, not for
+durable storage:
+
+  kubectl --namespace {{ .Release.Namespace }} exec -it deploy/{{ include "streamsight-agent.fullname" . }} -- tail -f {{ .Values.export.file.path }}
+
+Switch to a real destination with:
+
+  --set export.mode=http --set export.http.endpoint=https://... --set export.http.apiKey=...
+{{- end }}
+
+{{- if eq .Values.export.mode "stdout" }}
+
+Batches are written to stdout as JSONL and the agent's logs go to stderr, so
+the pod log stream is machine-parseable. Pipe it through a log shipper, or:
+
+  kubectl --namespace {{ .Release.Namespace }} logs deploy/{{ include "streamsight-agent.fullname" . }} | jq .
+{{- end }}
+
+{{- if gt (int .Values.replicaCount) 1 }}
+
+WARNING: replicaCount is {{ .Values.replicaCount }}. The agent is a singleton
+collector -- every replica collects and exports the whole cluster, so the
+backend will see duplicate batches from distinct agent_instance_ids.
+{{- end }}

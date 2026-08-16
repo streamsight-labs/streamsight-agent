@@ -1,3 +1,5 @@
+{{- include "streamsight-agent.validate" . -}}
+{{- $mode := .Values.export.mode | toString -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,33 +8,112 @@ metadata:
     {{- include "streamsight-agent.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- with .Values.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "streamsight-agent.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        # Roll the pod when its configuration changes. Without these, a
+        # `helm upgrade` that only touches the ConfigMap leaves the old agent
+        # running with the old settings until something else restarts it.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       labels:
         {{- include "streamsight-agent.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
+      serviceAccountName: {{ include "streamsight-agent.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: agent
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           envFrom:
+            - configMapRef:
+                name: {{ include "streamsight-agent.fullname" . }}
             - secretRef:
                 name: {{ include "streamsight-agent.fullname" . }}
           env:
-            - name: COLLECTION_INTERVAL
-              value: {{ .Values.collectionInterval | quote }}
-            - name: LOG_LEVEL
-              value: {{ .Values.logLevel | quote }}
+            # The agent's own default appends a per-boot random suffix, which
+            # would make the backend see a brand new instance after every
+            # container restart. The pod name is stable across restarts.
+            - name: AGENT_INSTANCE_ID
+              {{- if .Values.agent.instanceId }}
+              value: {{ .Values.agent.instanceId | quote }}
+              {{- else }}
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+              {{- end }}
+            {{- if and (eq $mode "http") .Values.export.http.existingSecret }}
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.export.http.existingSecret | quote }}
+                  key: {{ .Values.export.http.existingSecretKey | quote }}
+            {{- end }}
+            {{- if and .Values.kafka.sasl.enabled .Values.kafka.sasl.existingSecret }}
+            - name: KAFKA_SASL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.kafka.sasl.existingSecret | quote }}
+                  key: {{ .Values.kafka.sasl.existingSecretKey | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            {{- if eq $mode "file" }}
+            # readOnlyRootFilesystem is deliberately kept on; this emptyDir is
+            # the only writable path in the container, and EXPORT_FILE is
+            # validated to point inside it.
+            - name: data
+              mountPath: {{ .Values.export.file.mountPath | quote }}
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.securityContext }}
           securityContext:
-            runAsNonRoot: true
-            runAsUser: 1000
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        {{- if eq $mode "file" }}
+        - name: data
+          emptyDir:
+            {{- with .Values.export.file.medium }}
+            medium: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.export.file.sizeLimit }}
+            sizeLimit: {{ . | quote }}
+            {{- end }}
+        {{- end }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -43,5 +124,9 @@ spec:
       {{- end }}
       {{- with .Values.tolerations }}
       tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}

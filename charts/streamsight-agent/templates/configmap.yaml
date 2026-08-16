@@ -1,0 +1,54 @@
+{{- include "streamsight-agent.validate" . -}}
+{{- $mode := .Values.export.mode | toString -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "streamsight-agent.fullname" . }}
+  labels:
+    {{- include "streamsight-agent.labels" . | nindent 4 }}
+data:
+  # -- Kafka --------------------------------------------------------------
+  KAFKA_BROKERS: {{ .Values.kafka.brokers | quote }}
+  KAFKA_TLS_ENABLED: {{ .Values.kafka.tls.enabled | quote }}
+  {{- if .Values.kafka.sasl.enabled }}
+  KAFKA_SASL_MECHANISM: {{ .Values.kafka.sasl.mechanism | quote }}
+  KAFKA_SASL_USERNAME: {{ .Values.kafka.sasl.username | quote }}
+  {{- end }}
+
+  # -- Export -------------------------------------------------------------
+  EXPORT_MODE: {{ $mode | quote }}
+  {{- if eq $mode "http" }}
+  EXPORT_ENDPOINT: {{ .Values.export.http.endpoint | quote }}
+  EXPORT_QUEUE_SIZE: {{ .Values.export.http.queueSize | int | quote }}
+  EXPORT_MAX_RETRIES: {{ .Values.export.http.maxRetries | int | quote }}
+  EXPORT_BASE_DELAY: {{ .Values.export.http.baseDelay | quote }}
+  EXPORT_TIMEOUT: {{ .Values.export.http.timeout | quote }}
+  EXPORT_GZIP: {{ .Values.export.http.gzip | quote }}
+  {{- end }}
+  {{- if eq $mode "file" }}
+  EXPORT_FILE: {{ .Values.export.file.path | quote }}
+  EXPORT_FILE_MAX_MB: {{ .Values.export.file.maxMB | int | quote }}
+  EXPORT_FILE_MAX_BACKUPS: {{ .Values.export.file.maxBackups | int | quote }}
+  {{- end }}
+
+  # -- Collection ---------------------------------------------------------
+  COLLECTION_INTERVAL: {{ .Values.collection.interval | quote }}
+  {{- with .Values.collection.timeout }}
+  COLLECTION_TIMEOUT: {{ . | quote }}
+  {{- end }}
+  INCLUDE_INTERNAL_TOPICS: {{ .Values.collection.includeInternalTopics | quote }}
+  {{- with .Values.collection.topicIncludeRegex }}
+  TOPIC_INCLUDE_REGEX: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.collection.topicExcludeRegex }}
+  TOPIC_EXCLUDE_REGEX: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.collection.groupIncludeRegex }}
+  GROUP_INCLUDE_REGEX: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.collection.groupExcludeRegex }}
+  GROUP_EXCLUDE_REGEX: {{ . | quote }}
+  {{- end }}
+
+  # -- Agent --------------------------------------------------------------
+  LOG_LEVEL: {{ .Values.agent.logLevel | quote }}

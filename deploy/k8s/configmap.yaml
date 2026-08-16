@@ -1,0 +1,54 @@
+# Non-secret configuration. Every key maps onto an environment variable read
+# by internal/config/config.go, which validates the whole surface at startup:
+# a bad value fails the pod immediately instead of on the first tick.
+#
+# As written this deploys in local file mode -- no endpoint, no API key, no
+# egress. See the EXPORT block for switching to http.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: streamsight-agent
+  labels:
+    app: streamsight-agent
+data:
+  # -- Kafka (required) ---------------------------------------------------
+  KAFKA_BROKERS: "broker1:9092,broker2:9092"
+  KAFKA_TLS_ENABLED: "false"
+  # Uncomment together with KAFKA_SASL_PASSWORD in secret.yaml.
+  # KAFKA_SASL_MECHANISM: "SCRAM-SHA-512"   # PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512
+  # KAFKA_SASL_USERNAME: "streamsight-agent"
+
+  # -- Export -------------------------------------------------------------
+  # file   write JSONL to the emptyDir mounted at /var/lib/streamsight
+  # http   POST to EXPORT_ENDPOINT (also needs API_KEY in secret.yaml)
+  # stdout write JSONL to stdout; the agent's own logs stay on stderr
+  EXPORT_MODE: "file"
+
+  # File mode. EXPORT_FILE must point inside the mounted volume: the
+  # container root filesystem is read-only.
+  EXPORT_FILE: "/var/lib/streamsight/metrics.jsonl"
+  EXPORT_FILE_MAX_MB: "100" # rotate at this size; negative disables rotation
+  EXPORT_FILE_MAX_BACKUPS: "3" # rotated files kept; 0 keeps none
+
+  # HTTP mode. Uncomment these and set EXPORT_MODE=http.
+  # EXPORT_ENDPOINT: "https://ingest.example.com/v1/batches"
+  # EXPORT_QUEUE_SIZE: "100"    # bounded queue; overflow drops rather than stalls
+  # EXPORT_MAX_RETRIES: "3"     # retries per batch on 408/429/5xx
+  # EXPORT_BASE_DELAY: "1s"     # full-jitter backoff base
+  # EXPORT_TIMEOUT: "10s"       # per-request deadline
+  # EXPORT_GZIP: "true"
+
+  # -- Collection ---------------------------------------------------------
+  COLLECTION_INTERVAL: "30s"
+  # Per-cycle deadline. Omitted, the agent derives 80% of the interval.
+  # COLLECTION_TIMEOUT: "24s"
+  INCLUDE_INTERNAL_TOPICS: "false"
+  # Filters. Empty or absent means match everything; exclude wins over
+  # include. Compiled at startup, so a bad pattern fails the pod.
+  # TOPIC_INCLUDE_REGEX: ""
+  # TOPIC_EXCLUDE_REGEX: "^_"
+  # GROUP_INCLUDE_REGEX: ""
+  # GROUP_EXCLUDE_REGEX: ""
+
+  # -- Agent --------------------------------------------------------------
+  LOG_LEVEL: "info" # debug | info | warn | error

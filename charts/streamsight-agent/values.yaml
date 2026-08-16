@@ -1,27 +1,136 @@
+# Default values for streamsight-agent.
+#
+# Every key below maps onto an environment variable read by
+# internal/config/config.go. The agent validates the whole surface at startup
+# and reports every problem at once, so a bad value fails the pod immediately
+# rather than on the first collection tick.
+
+# The agent is a singleton collector: two replicas means every batch is
+# collected and shipped twice. Scale by sharding on topic/group filters across
+# separate releases, not by raising this.
 replicaCount: 1
 
 image:
-  repository: ghcr.io/streamsight/agent
+  # Published by .github/workflows/docker.yml as ghcr.io/<owner>/<repo>.
+  repository: ghcr.io/streamsight-labs/streamsight-agent
   pullPolicy: IfNotPresent
+  # Defaults to .Chart.AppVersion.
   tag: ""
 
-# Required
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  # Used when create is false, or as the name of the created account.
+  name: ""
+
+# The agent never calls the Kubernetes API, so it does not need a token.
+automountServiceAccountToken: false
+
 kafka:
+  # KAFKA_BROKERS -- required, comma separated host:port.
   brokers: "broker:9092"
-  # SASL authentication (optional)
+
   sasl:
+    # When enabled, mechanism/username/password are all required by the agent.
     enabled: false
+    # KAFKA_SASL_MECHANISM -- PLAIN, SCRAM-SHA-256 or SCRAM-SHA-512.
     mechanism: "SCRAM-SHA-512"
+    # KAFKA_SASL_USERNAME
     username: ""
+    # KAFKA_SASL_PASSWORD, stored in the chart-managed Secret. Prefer
+    # existingSecret in production so the credential is not in values.yaml.
     password: ""
+    # Read KAFKA_SASL_PASSWORD from a Secret this chart does not manage.
+    # Takes precedence over .password.
+    existingSecret: ""
+    existingSecretKey: "KAFKA_SASL_PASSWORD"
+
   tls:
+    # KAFKA_TLS_ENABLED -- system root CAs, verified certificates, TLS 1.2 floor.
     enabled: false
 
-apiKey: ""
+export:
+  # EXPORT_MODE -- file | http | stdout.
+  #
+  #   file   write JSONL to a volume (the default; no network, no credential)
+  #   http   POST batches to a collector endpoint (needs endpoint + API key)
+  #   stdout write JSONL to stdout for a log shipper to pick up
+  mode: "file"
 
-# Optional
-collectionInterval: "30s"
-logLevel: "info"
+  http:
+    # EXPORT_ENDPOINT -- required when mode is http.
+    endpoint: ""
+    # API_KEY -- required when mode is http, ignored otherwise. Stored in the
+    # chart-managed Secret. Leave empty for file/stdout mode; the chart renders
+    # valid manifests either way.
+    apiKey: ""
+    # Read API_KEY from a Secret this chart does not manage. Takes precedence
+    # over .apiKey.
+    existingSecret: ""
+    existingSecretKey: "API_KEY"
+    # EXPORT_QUEUE_SIZE -- bounded in-memory queue; overflow drops the batch
+    # rather than stalling collection.
+    queueSize: 100
+    # EXPORT_MAX_RETRIES -- retries per batch on 408/429/5xx.
+    maxRetries: 3
+    # EXPORT_BASE_DELAY -- full-jitter backoff base.
+    baseDelay: "1s"
+    # EXPORT_TIMEOUT -- per-request deadline.
+    timeout: "10s"
+    # EXPORT_GZIP
+    gzip: true
+
+  file:
+    # Writable mount point for file mode. The container root filesystem is
+    # read-only, so this emptyDir is the only place the agent can write.
+    mountPath: "/var/lib/streamsight"
+    # EXPORT_FILE -- must live under mountPath or the chart refuses to render.
+    path: "/var/lib/streamsight/metrics.jsonl"
+    # EXPORT_FILE_MAX_MB -- rotate at this size. 0 uses the exporter's 100MB
+    # default; a negative value disables rotation entirely (unbounded growth).
+    maxMB: 100
+    # EXPORT_FILE_MAX_BACKUPS -- rotated files kept. 0 keeps none.
+    maxBackups: 3
+    # emptyDir sizeLimit. Keep it above maxMB * (maxBackups + 1) or the kubelet
+    # can evict the pod mid-rotation.
+    sizeLimit: "1Gi"
+    # emptyDir medium: "" for node disk, "Memory" for tmpfs (counts against
+    # the container memory limit).
+    medium: ""
+
+collection:
+  # COLLECTION_INTERVAL -- must be > 0.
+  interval: "30s"
+  # COLLECTION_TIMEOUT -- per-cycle deadline. Empty lets the agent derive 80%
+  # of the interval.
+  timeout: ""
+  # INCLUDE_INTERNAL_TOPICS -- __consumer_offsets and friends.
+  includeInternalTopics: false
+  # Filters. Empty means match everything. Exclude wins over include.
+  # Compiled at startup, so a bad pattern fails the pod immediately.
+  topicIncludeRegex: ""
+  topicExcludeRegex: ""
+  groupIncludeRegex: ""
+  groupExcludeRegex: ""
+
+agent:
+  # LOG_LEVEL -- debug | info | warn | error. Logs go to stderr, so stdout
+  # stays parseable JSONL in stdout export mode.
+  logLevel: "info"
+  # AGENT_INSTANCE_ID. Empty uses the pod name, which is stable across
+  # container restarts; the agent's own default appends a per-boot random
+  # suffix, which would make the backend see a new instance after every crash.
+  instanceId: ""
+
+# Anything not modelled above. Appended verbatim to the container env, so it
+# also wins over the generated values.
+extraEnv: []
+#  - name: SOME_FUTURE_KNOB
+#    value: "1"
 
 resources:
   requests:
@@ -31,6 +140,35 @@ resources:
     memory: "128Mi"
     cpu: "100m"
 
+# Recreate, not RollingUpdate: a surge pod would collect and export the same
+# cluster twice for the length of the rollout.
+strategy:
+  type: Recreate
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  # Gives uid 1000 write access to the emptyDir volumes.
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# The agent exposes no HTTP server, so there is nothing to probe. It exits
+# non-zero on an unrecoverable error and the kubelet restarts it.
+
+podAnnotations: {}
+podLabels: {}
+priorityClassName: ""
+terminationGracePeriodSeconds: 30
 nodeSelector: {}
 tolerations: []
 affinity: {}
+topologySpreadConstraints: []
