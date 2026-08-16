@@ -1,14 +1,68 @@
+# Single-node Kafka (KRaft, no auth) plus the agent in local file mode.
+#
+#   docker compose up -d              # Kafka + agent
+#   docker compose logs -f agent      # agent's own stderr logs
+#   docker compose exec agent tail -f /var/lib/streamsight/metrics.jsonl
+#
+# The agent writes one JSON object per line to a named volume; it needs no
+# API key, no endpoint and no network beyond Kafka itself.
+#
+# Kafka is also published on localhost:9092, so `make run` on the host talks to
+# this same broker.
+
 services:
-  agent:
-    build: .
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    hostname: kafka
+    ports:
+      - "9092:9092"
     environment:
-      - KAFKA_BROKERS=kafka:9092
-      - API_KEY=your-api-key
-      # Optional
-      # - KAFKA_SASL_MECHANISM=SCRAM-SHA-512
-      # - KAFKA_SASL_USERNAME=user
-      # - KAFKA_SASL_PASSWORD=pass
-      # - KAFKA_TLS_ENABLED=true
-      # - COLLECTION_INTERVAL=30s
-      # - LOG_LEVEL=info
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+
+      # INTERNAL is what other containers use; EXTERNAL is published to the
+      # host so `make run` (localhost:9092) reaches the same broker.
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/29092'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: kafka:29092
+      # No EXPORT_MODE and no EXPORT_ENDPOINT means file mode. EXPORT_FILE
+      # defaults to /var/lib/streamsight/metrics.jsonl in the image.
+      EXPORT_FILE_MAX_MB: "100"
+      EXPORT_FILE_MAX_BACKUPS: "3"
+      COLLECTION_INTERVAL: 10s
+      INCLUDE_INTERNAL_TOPICS: "true"
+      LOG_LEVEL: info
+    volumes:
+      # /var/lib/streamsight exists in the image and is owned by uid 1000, so
+      # the named volume inherits that ownership and stays writable.
+      - agent-data:/var/lib/streamsight
     restart: unless-stopped
+
+volumes:
+  agent-data:

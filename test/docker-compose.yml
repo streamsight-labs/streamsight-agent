@@ -1,54 +1,93 @@
+# Local Kafka with SASL/SCRAM authentication and ACL authorization, plus the
+# agent running against it with exactly the read-only ACLs documented in the
+# README. Use it to prove a permission set is sufficient before deploying.
+#
+#   make test-local-up      # broker, ACL setup, agent
+#   make test-local-logs    # agent stderr logs + one JSON batch per line
+#   make test-local-down    # stop and delete the volumes
+#
+# Notes on the broker:
+#   * SCRAM credentials in KRaft live in the metadata log, so the bootstrap
+#     admin credential must be written by `kafka-storage format --add-scram`
+#     BEFORE the broker starts. That is why the entrypoint is overridden: the
+#     stock Confluent entrypoint formats without it and there is no env var to
+#     pass it. Every later credential (the agent's) is created at runtime by
+#     setup-acls.sh over the admin connection.
+#   * The CONTROLLER listener is PLAINTEXT. A KRaft controller has to be
+#     reachable before the metadata log it would authenticate against is
+#     readable, so User:ANONYMOUS is a super user for that listener only.
+#   * The image ships CLI tools without the .sh suffix (kafka-acls, not
+#     kafka-acls.sh); setup-acls.sh matches.
+
 services:
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     hostname: kafka
-    container_name: kafka
+    container_name: streamsight-test-kafka
     ports:
-      - "9092:9092"
+      # SASL_PLAINTEXT for host tools. In-cluster clients use kafka:9092.
+      - "19092:19092"
     environment:
-      # KRaft settings
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
-
-      # Listeners
-      KAFKA_LISTENERS: SASL_PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: SASL_PLAINTEXT://kafka:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: SASL_PLAINTEXT:SASL_PLAINTEXT,CONTROLLER:SASL_PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_INTER_BROKER_LISTENER_NAME: SASL_PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: BROKER
 
-      # SASL settings
-      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: SCRAM-SHA-512
+      KAFKA_LISTENERS: BROKER://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:19092
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka:9092,EXTERNAL://localhost:19092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: BROKER:SASL_PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:SASL_PLAINTEXT
+
       KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
-      KAFKA_SASL_MECHANISM_CONTROLLER_PROTOCOL: SCRAM-SHA-512
+      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: SCRAM-SHA-512
+      # A SASL listener needs a server-side JAAS entry for its mechanism; the
+      # credentials in it are what this broker uses as a client for
+      # inter-broker connections.
+      KAFKA_LISTENER_NAME_BROKER_SCRAM-SHA-512_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="admin-secret";'
+      KAFKA_LISTENER_NAME_EXTERNAL_SCRAM-SHA-512_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="admin-secret";'
 
-      # ACL authorizer
       KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
-      KAFKA_SUPER_USERS: User:admin
+      KAFKA_SUPER_USERS: User:admin;User:ANONYMOUS
+      # Nothing is permitted unless an ACL says so, which is the point: if the
+      # agent's ACL set is incomplete, the agent fails here rather than in
+      # production.
       KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "false"
 
-      # JAAS config
-      KAFKA_OPTS: "-Djava.security.auth.login.config=/etc/kafka/kafka_jaas.conf"
-
-      # Logging
-      KAFKA_LOG4J_LOGGERS: "kafka.authorizer.logger=INFO"
-      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
-
-      # Other
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-    volumes:
-      - ./kafka/kafka_jaas.conf:/etc/kafka/kafka_jaas.conf:ro
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+      # Denied requests are logged at INFO, which is how you debug a missing ACL.
+      KAFKA_LOG4J_LOGGERS: "kafka.authorizer.logger=INFO"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        # Admin credentials for ad-hoc CLI use inside this container, e.g.
+        #   docker compose exec kafka kafka-acls --bootstrap-server localhost:9092 \
+        #     --command-config /tmp/admin.properties --list
+        cat > /tmp/admin.properties << 'PROPS'
+        security.protocol=SASL_PLAINTEXT
+        sasl.mechanism=SCRAM-SHA-512
+        sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="admin-secret";
+        PROPS
+        /etc/confluent/docker/configure
+        kafka-storage format --cluster-id "$${CLUSTER_ID}" -c /etc/kafka/kafka.properties \
+          --add-scram 'SCRAM-SHA-512=[name=admin,password=admin-secret]' --ignore-formatted
+        exec /etc/confluent/docker/run
     healthcheck:
-      test: ["CMD", "kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
-      interval: 10s
+      # A TCP probe only: every API call on this broker needs credentials, and
+      # setup-acls.sh does the real authenticated readiness loop.
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/9092'"]
+      interval: 5s
       timeout: 5s
-      retries: 10
-      start_period: 30s
+      retries: 30
+      start_period: 20s
 
+  # Creates the agent's SCRAM credential and its read-only ACLs, then seeds a
+  # topic and a consumer group so the first batch has something in it.
   kafka-init:
     image: confluentinc/cp-kafka:7.5.0
     depends_on:
@@ -58,6 +97,10 @@ services:
       - ./setup-acls.sh:/setup-acls.sh:ro
     environment:
       BOOTSTRAP_SERVER: kafka:9092
+      ADMIN_USER: admin
+      ADMIN_PASSWORD: admin-secret
+      AGENT_USER: streamsight-agent
+      AGENT_PASSWORD: agent-secret
     command: ["/bin/bash", "/setup-acls.sh"]
 
   agent:
@@ -72,7 +115,10 @@ services:
       KAFKA_SASL_MECHANISM: SCRAM-SHA-512
       KAFKA_SASL_USERNAME: streamsight-agent
       KAFKA_SASL_PASSWORD: agent-secret
-      API_KEY: test-api-key
+      # stdout mode: batches show up in `docker compose logs agent` as one JSON
+      # object per line. Agent logs go to stderr, so the two never interleave
+      # within a line.
+      EXPORT_MODE: stdout
       COLLECTION_INTERVAL: 10s
       LOG_LEVEL: debug
     restart: unless-stopped
