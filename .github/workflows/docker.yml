@@ -1,17 +1,27 @@
+# Publishes ghcr.io/<owner>/<repo>, i.e.
+# ghcr.io/streamsight-labs/streamsight-agent. That path is the one the Helm
+# chart (charts/streamsight-agent/values.yaml) and the plain manifests
+# (deploy/k8s/deployment.yaml) pull from -- they must not drift apart again.
+#
+# Pull requests do not push; .github/workflows/ci.yml builds the image without
+# pushing so a broken Dockerfile is caught before it reaches a tag.
 name: Docker
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
-  # Uncomment to also build on main branch:
-  # push:
-  #   branches:
-  #     - main
+  workflow_dispatch:
 
 permissions:
   contents: read
   packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -32,15 +42,37 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The string stamped into main.version, matching what the Makefile's
+      # `git describe --tags --always --dirty` produces locally: the tag
+      # verbatim for a release, branch+sha for a main build. It ends up on
+      # every exported batch as agent_version, so it has to be meaningful.
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            version="${{ github.ref_name }}"
+          else
+            version="${{ github.ref_name }}-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "building version ${version}"
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          # latest=auto: a semver tag also publishes :latest, which is what
+          # deploy/k8s/deployment.yaml points at. A main build does not.
+          flavor: |
+            latest=auto
           tags: |
-            type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
 
       - name: Build and push
         uses: docker/build-push-action@v5
@@ -51,6 +83,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -31,8 +31,13 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          # Same toolchain as CI and the Dockerfile builder.
+          go-version-file: go.mod
+          cache: true
 
+      # The tag verbatim, which is also what the Makefile's `git describe`
+      # produces, stamped into main.version with the same ldflag. It travels
+      # on every batch as agent_version.
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
@@ -40,7 +45,8 @@ jobs:
           CGO_ENABLED: 0
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          go build -ldflags="-s -w -X main.version=${VERSION}" \
+          echo "building ${VERSION} for ${GOOS}/${GOARCH}"
+          go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
             -o streamsight-agent-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} \
             ./cmd/agent
 
@@ -49,6 +55,7 @@ jobs:
         with:
           name: streamsight-agent-${{ matrix.goos }}-${{ matrix.goarch }}
           path: streamsight-agent-*
+          if-no-files-found: error
 
   release:
     needs: build
@@ -60,8 +67,14 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum streamsight-agent-* > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
           generate_release_notes: true
