@@ -8,11 +8,10 @@ import (
 	"kafka-metrics-agent/internal/metrics"
 )
 
-// collectCluster issues the single metadata request the cycle is built on. It
-// also hands back the raw topic details so the topics phase does not have to
-// ask again.
+// collectCluster issues the single metadata request the cycle is built on, and
+// hands back the raw topic details so the topics phase need not ask again.
 func (c *Collector) collectCluster(ctx context.Context) (metrics.ClusterMetrics, kadm.TopicDetails, *section) {
-	sec := newSection(sectionCluster)
+	sec := c.newSection(sectionCluster)
 	defer sec.stop()
 
 	meta, err := c.client.Admin.Metadata(ctx)
@@ -39,46 +38,54 @@ func (c *Collector) collectCluster(ctx context.Context) (metrics.ClusterMetrics,
 	return cluster, meta.Topics, sec
 }
 
-// collectTopics samples log start offsets and high watermarks for every topic
-// that survives the filter.
+// collectTopics samples log start offsets, last stable offsets and high
+// watermarks for every topic that survives the filter.
 //
-// It blocks on committed before listing end offsets: the two are read from
-// different brokers at different instants, and lag is end-committed, so
-// sampling the committed side first keeps the residual error positive.
+// PHASE ORDER HERE IS A CORRECTNESS CONSTRAINT, NOT AN OPTIMISATION. The three
+// listings are read at different instants and every quantity derived from them
+// is a difference, so the sampling order decides the sign of the residual skew:
+//
+//	start  <=  committed  <=  LSO  <=  high watermark
+//
+//	consumer overrun    committed < start   needs start before committed
+//	classic lag         end - committed     needs committed before end
+//	read_committed lag  lso - committed     needs committed before LSO
+//	transaction backlog end - lso           needs LSO before end
+//
+// Only this order keeps all four non-negative at once. Running the LSO call
+// concurrently with, or after, ListEndOffsets would let the backlog go negative
+// and a hung transaction would silently read as "not hung".
 func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, committed <-chan struct{}) ([]metrics.TopicMetrics, []*section) {
-	sec := newSection(sectionTopics)
+	sec := c.newSection(sectionTopics)
 	defer sec.stop()
 
-	// endSec is stamped later, immediately before ListEndOffsets, so its
-	// SampledAt is the true sample time of every high watermark below.
-	var endSec *section
-
-	if tds == nil {
-		// Cluster metadata failed; there is nothing to sample. "skipped" is
-		// not "no topics".
-		sec.downgrade(metrics.SectionSkipped)
-		endSec = newSection(sectionTopicsEnd)
-		endSec.downgrade(metrics.SectionSkipped)
-		endSec.stop()
-		return nil, []*section{sec, endSec}
+	// skipped builds the two later sections for a path that never reached them.
+	// Every return below is the same length and order, so a backend can always
+	// tell "not collected" from "collected, empty".
+	skipped := func() []*section {
+		lso, end := c.newSection(sectionTopicsLSO), c.newSection(sectionTopicsEnd)
+		lso.downgrade(metrics.SectionSkipped)
+		end.downgrade(metrics.SectionSkipped)
+		lso.stop()
+		end.stop()
+		return []*section{sec, lso, end}
 	}
 
-	selected := make([]kadm.TopicDetail, 0, len(tds))
-	for _, td := range tds.Sorted() {
-		if td.IsInternal && !c.opts.IncludeInternalTopics {
-			continue
-		}
-		if !c.topics.allow(td.Topic) {
-			continue
-		}
-		selected = append(selected, td)
+	if tds == nil {
+		// Cluster metadata failed: "skipped" is not "no topics".
+		sec.downgrade(metrics.SectionSkipped)
+		return nil, skipped()
+	}
+
+	selected, droppedTopics := selectTopics(tds, c.topics, c.opts.IncludeInternalTopics, c.limits.MaxTopics)
+	if droppedTopics > 0 {
+		sec.dropped.Topics = droppedTopics
+		sec.truncated = true
 	}
 	if len(selected) == 0 {
 		// Never fall through to a bare List*Offsets: with no topic arguments
 		// kadm lists the entire cluster, which is the opposite of a filter.
-		endSec = newSection(sectionTopicsEnd)
-		endSec.stop()
-		return nil, []*section{sec, endSec}
+		return nil, skipped()
 	}
 
 	names := make([]string, 0, len(selected))
@@ -87,84 +94,180 @@ func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, co
 	}
 
 	starts, err := c.client.Admin.ListStartOffsets(ctx, names...)
-	startsOK := sec.request("ListStartOffsets", err)
+	startsOK := sec.requestPartial("ListStartOffsets", err, len(starts) > 0)
 
 	select {
 	case <-committed:
 	case <-ctx.Done():
 	}
 
-	endSec = newSection(sectionTopicsEnd)
+	// Last stable offsets, strictly between the committed sample and the high
+	// watermarks. ListCommittedOffsets is ListOffsets at isolation level
+	// READ_COMMITTED: a round trip, no new permission.
+	//
+	// lsoSec and endSec are stamped immediately before their own request, not at
+	// entry, so SampledAt is the true sample instant of the offsets they carry.
+	lsoSec := c.newSection(sectionTopicsLSO)
+	var (
+		lsos   kadm.ListedOffsets
+		lsosOK bool
+	)
+	if c.opts.CollectLastStableOffset {
+		lsos, err = c.client.Admin.ListCommittedOffsets(ctx, names...)
+		lsosOK = lsoSec.requestPartial("ListCommittedOffsets", err, len(lsos) > 0)
+	} else {
+		lsoSec.downgrade(metrics.SectionSkipped)
+	}
+	lsoSec.stop()
+
+	endSec := c.newSection(sectionTopicsEnd)
 	ends, err := c.client.Admin.ListEndOffsets(ctx, names...)
-	endsOK := endSec.request("ListEndOffsets", err)
+	endsOK := endSec.requestPartial("ListEndOffsets", err, len(ends) > 0)
 	endSec.stop()
 
 	topics := make([]metrics.TopicMetrics, 0, len(selected))
 	for _, td := range selected {
-		tm := metrics.TopicMetrics{
-			Name:     td.Topic,
-			Internal: td.IsInternal,
-		}
-		if td.ID != (kadm.TopicID{}) {
-			tm.ID = td.ID.String()
-		}
-		if td.Err != nil {
-			tm.ErrorCode = errorCode(td.Err)
-			sec.recordTopic("Metadata", td.Topic, td.Err)
-		}
-
-		parts := td.Partitions.Sorted()
-		tm.PartitionCount = len(parts)
-		tm.ReplicationFactor = replicationFactor(parts)
-
-		startsHere := startsOK && topicListed(sec, "ListStartOffsets", starts, td.Topic)
-		endsHere := endsOK && topicListed(endSec, "ListEndOffsets", ends, td.Topic)
-
-		tm.Partitions = make([]metrics.Partition, 0, len(parts))
-		for _, p := range parts {
-			part := metrics.Partition{
-				ID:              p.Partition,
-				Leader:          p.Leader,
-				LeaderEpoch:     p.LeaderEpoch,
-				Replicas:        p.Replicas,
-				ISR:             p.ISR,
-				OfflineReplicas: p.OfflineReplicas,
-			}
-			if p.Err != nil {
-				part.ErrorCode = errorCode(p.Err)
-				sec.recordPartition("Metadata", td.Topic, p.Partition, p.Err)
-			}
-			if startsHere {
-				var err error
-				part.StartOffset, err = lookupOffset(sec, "ListStartOffsets", starts, td.Topic, p.Partition)
-				if err != nil && part.ErrorCode == 0 {
-					part.ErrorCode = errorCode(err)
-				}
-			}
-			if endsHere {
-				var err error
-				part.EndOffset, err = lookupOffset(endSec, "ListEndOffsets", ends, td.Topic, p.Partition)
-				if err != nil && part.ErrorCode == 0 {
-					part.ErrorCode = errorCode(err)
-				}
-			}
-			tm.Partitions = append(tm.Partitions, part)
-		}
-
-		topics = append(topics, tm)
+		topics = append(topics, c.buildTopic(td, sec,
+			offsetSample{api: "ListStartOffsets", sec: sec, listed: starts, ok: startsOK},
+			offsetSample{api: "ListCommittedOffsets", sec: lsoSec, listed: lsos, ok: lsosOK},
+			offsetSample{api: "ListEndOffsets", sec: endSec, listed: ends, ok: endsOK},
+		))
 	}
 
-	return topics, []*section{sec, endSec}
+	return topics, []*section{sec, lsoSec, endSec}
+}
+
+// offsetSample is one List*Offsets result together with the section that owns
+// its errors and whether the result is usable at all. It keeps the null-vs-zero
+// and error-attribution rules identical across the three offset phases.
+type offsetSample struct {
+	api    string
+	sec    *section
+	listed kadm.ListedOffsets
+	ok     bool
+
+	// here is set per topic by enter. It is separate from ok because a missing
+	// topic is recorded once per topic, not once per partition.
+	here bool
+}
+
+// enter resolves whether this sample covers the topic, recording one
+// topic-scoped error if not.
+func (s *offsetSample) enter(topic string) {
+	s.here = s.ok && topicListed(s.sec, s.api, s.listed, topic)
+}
+
+// lookup maps one partition onto the nullable wire field. An unusable sample
+// yields nil with no error: "the phase did not run" is already in the section
+// status, and recording it per partition would bury the real failures.
+func (s *offsetSample) lookup(topic string, partition int32) (*int64, error) {
+	if !s.here {
+		return nil, nil
+	}
+	return lookupOffset(s.sec, s.api, s.listed, topic, partition)
+}
+
+// selectTopics applies the internal-topic rule, the regex filter and maxTopics,
+// in that order, over kadm's deterministic Sorted() order.
+//
+// The order matters: a topic the operator already excluded by regex must not
+// consume cap budget. Truncation is a stable prefix, so the same topics are kept
+// every cycle and the backend does not see churn that looks like a cluster
+// event. maxTopics reduces broker load only because it is applied here, before
+// the List*Offsets name list is built.
+func selectTopics(tds kadm.TopicDetails, f *filter, includeInternal bool, maxTopics int) (selected []kadm.TopicDetail, dropped int) {
+	selected = make([]kadm.TopicDetail, 0, len(tds))
+	for _, td := range tds.Sorted() {
+		if td.IsInternal && !includeInternal {
+			continue
+		}
+		if !f.allow(td.Topic) {
+			continue
+		}
+		selected = append(selected, td)
+	}
+	keep, dropped := capLen(len(selected), maxTopics)
+	return selected[:keep], dropped
+}
+
+// buildTopic shapes one topic's metrics and records its per-partition failures.
+// It touches no Kafka client, so the truncation invariants below are reachable
+// from a test.
+func (c *Collector) buildTopic(td kadm.TopicDetail, sec *section, starts, lsos, ends offsetSample) metrics.TopicMetrics {
+	tm := metrics.TopicMetrics{
+		Name:     td.Topic,
+		Internal: td.IsInternal,
+	}
+	if td.ID != (kadm.TopicID{}) {
+		tm.ID = td.ID.String()
+	}
+	if td.Err != nil {
+		tm.ErrorCode = errorCode(td.Err)
+		sec.recordTopic("Metadata", td.Topic, td.Err)
+	}
+
+	parts := td.Partitions.Sorted()
+	// Both summaries are computed over the FULL partition slice, before the cap:
+	// PartitionCount stays true so len(Partitions) < PartitionCount is the
+	// truncation signal, and a minimum over an arbitrary prefix would make a
+	// truncated topic report a durability floor it does not have.
+	tm.PartitionCount = len(parts)
+	tm.ReplicationFactor = replicationFactor(parts)
+
+	keep, dropped := capLen(len(parts), c.limits.MaxPartitionsPerTopic)
+	if dropped > 0 {
+		sec.dropped.Partitions += dropped
+		sec.truncated = true
+	}
+	emit := parts[:keep]
+
+	// Once per topic: a topic missing from a listing is one error, not
+	// len(partitions) of them.
+	starts.enter(td.Topic)
+	lsos.enter(td.Topic)
+	ends.enter(td.Topic)
+
+	tm.Partitions = make([]metrics.Partition, 0, len(emit))
+	for _, p := range emit {
+		part := metrics.Partition{
+			ID:              p.Partition,
+			Leader:          p.Leader,
+			LeaderEpoch:     p.LeaderEpoch,
+			Replicas:        p.Replicas,
+			ISR:             p.ISR,
+			OfflineReplicas: p.OfflineReplicas,
+		}
+		if p.Err != nil {
+			part.ErrorCode = errorCode(p.Err)
+			sec.recordPartition("Metadata", td.Topic, p.Partition, p.Err)
+		}
+		// The FIRST failure wins the partition's error code: a partition whose
+		// leader is gone fails every subsequent phase for the same reason.
+		var err error
+		part.StartOffset, err = starts.lookup(td.Topic, p.Partition)
+		if err != nil && part.ErrorCode == 0 {
+			part.ErrorCode = errorCode(err)
+		}
+		part.LastStableOffset, err = lsos.lookup(td.Topic, p.Partition)
+		if err != nil && part.ErrorCode == 0 {
+			part.ErrorCode = errorCode(err)
+		}
+		part.EndOffset, err = ends.lookup(td.Topic, p.Partition)
+		if err != nil && part.ErrorCode == 0 {
+			part.ErrorCode = errorCode(err)
+		}
+		tm.Partitions = append(tm.Partitions, part)
+	}
+	return tm
 }
 
 // replicationFactor is the minimum replica count across partitions.
 //
-// It is deliberately not "the replica count of partition 0": kadm keys
-// partitions by a map, so any single sample is whichever partition Go's
-// iteration order hit first, and during a reassignment partitions genuinely
-// disagree. The minimum is the number that matters for durability. Partitions
-// that failed to load carry no replica list and are skipped rather than
-// dragging the answer to zero.
+// Deliberately not "the replica count of partition 0": kadm keys partitions by
+// a map, so any single sample is whichever one Go's iteration order hit first,
+// and during a reassignment partitions genuinely disagree. Partitions that
+// failed to load carry no replica list and are skipped rather than dragging the
+// answer to zero.
 func replicationFactor(parts []kadm.PartitionDetail) int {
 	lowest := 0
 	seen := false
@@ -180,8 +283,7 @@ func replicationFactor(parts []kadm.PartitionDetail) int {
 	return lowest
 }
 
-// topicListed reports whether the listing contains the topic at all, recording
-// one topic-scoped error instead of one per partition when it does not.
+// topicListed reports whether the listing contains the topic at all.
 func topicListed(sec *section, api string, listed kadm.ListedOffsets, topic string) bool {
 	if _, ok := listed[topic]; ok {
 		return true
@@ -211,7 +313,7 @@ func lookupOffset(sec *section, api string, listed kadm.ListedOffsets, topic str
 }
 
 // internalTopics is the set of broker-flagged internal topics, used to filter
-// committed offsets without re-applying the wrong "__" prefix guess.
+// committed offsets without falling back on the wrong "__" prefix guess.
 func internalTopics(tds kadm.TopicDetails) map[string]bool {
 	if tds == nil {
 		return nil

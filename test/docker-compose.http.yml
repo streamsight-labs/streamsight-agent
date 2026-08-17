@@ -1,0 +1,71 @@
+# HTTP export, end to end, against a conformance-checking mock ingest.
+#
+# This is an OVERRIDE layered on ./docker-compose.yml, never a stack of its own:
+# the SASL/SCRAM broker, the StandardAuthorizer and the three DESCRIBE-only ACLs
+# from setup-acls.sh are reused untouched. Running http mode this way proves the
+# export path under exactly the read-only permission model the product sells,
+# and it adds NO new ACL of any kind — the mock never speaks to Kafka.
+#
+#   make test-http          # bring it all up and follow the conformance output
+#   make test-http-logs     # follow it again later
+#   make test-http-down     # stop and delete the volumes
+#   make test-http-verify   # same stack as a pass/fail gate (MOCK_REQUIRE batches)
+#
+# READ THIS BEFORE FILING A BUG: MOCK_FAIL_FIRST and MOCK_EVERY_NTH are
+# DELIBERATE fault injection, on by default. The agent WILL log "export failed"
+# warnings, and the mock prints a matching "[fault] ..." line for every one of
+# them. That is the harness working. Set MOCK_FAIL_FIRST=0 MOCK_EVERY_NTH=0 for
+# a clean run.
+#
+# MOCK_REQUIRE=0 (the default) runs forever, which is what the demo wants. Any
+# positive value makes mock-ingest exit 0 once that many batches have been
+# accepted, and non-zero otherwise, which is what the gate wants.
+
+services:
+  mock-ingest:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile.mock-ingest
+    container_name: streamsight-mock-ingest
+    ports:
+      # Change MOCK_PORT if something else already owns 8088 locally — the
+      # streamsight-control-plane stack is the usual collision.
+      - "${MOCK_PORT:-8088}:8088"
+    command:
+      - --addr=:8088
+      - --path=/v1/batches
+      - --api-key=local-dev-key
+      - --require=${MOCK_REQUIRE:-0}
+      - --fail-first=${MOCK_FAIL_FIRST:-2}
+      - --every-nth=${MOCK_EVERY_NTH:-5}
+      - --every-nth-status=429
+      - --retry-after=1
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8088/healthz || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+
+  agent:
+    # Both entries are restated rather than relying on the merge of the base
+    # file's depends_on: the exact merge semantics of a mapping across two -f
+    # files have varied between Compose versions, and losing the kafka-init
+    # dependency would start the agent before its ACLs exist.
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      mock-ingest:
+        condition: service_healthy
+    environment:
+      # Replaces the base file's EXPORT_MODE: stdout. Everything Kafka-side
+      # (brokers, SASL credentials) merges in from ./docker-compose.yml.
+      EXPORT_MODE: http
+      EXPORT_ENDPOINT: http://mock-ingest:8088/v1/batches
+      API_KEY: local-dev-key
+      EXPORT_GZIP: "true"
+      EXPORT_MAX_RETRIES: "5"
+      EXPORT_BASE_DELAY: 500ms
+      EXPORT_TIMEOUT: 5s
+      COLLECTION_INTERVAL: 5s
+      LOG_LEVEL: debug

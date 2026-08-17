@@ -39,3 +39,6 @@ Thumbs.db
 # Debug
 debug
 __debug_bin*
+
+# Stray root build artifact from `go build ./cmd/agent` with no -o
+/agent

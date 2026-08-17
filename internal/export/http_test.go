@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -193,8 +194,8 @@ func TestHTTPExporter_Export_RetryOn5xx(t *testing.T) {
 	}
 }
 
-// 408 and 429 are transient. Treating them as terminal, as the old
-// isClientError did, permanently discards customer data on a rate limit.
+// 408 and 429 are transient; treating them as terminal, as a plain "4xx is
+// fatal" rule does, permanently discards customer data on a rate limit.
 func TestHTTPExporter_Export_RetriesTransient4xx(t *testing.T) {
 	for _, status := range []int{http.StatusRequestTimeout, http.StatusTooManyRequests} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -369,7 +370,7 @@ func TestHTTPExporter_Export_QueueFull(t *testing.T) {
 
 	var dropped int
 	for i := 0; i < 8; i++ {
-		if err := exporter.Export(context.Background(), &metrics.Batch{CollectedAt: time.Now()}); err == ErrQueueFull {
+		if err := exporter.Export(context.Background(), &metrics.Batch{CollectedAt: time.Now()}); errors.Is(err, ErrQueueFull) {
 			dropped++
 		}
 	}
@@ -381,6 +382,8 @@ func TestHTTPExporter_Export_QueueFull(t *testing.T) {
 	if stats.BatchesDropped != uint64(dropped) {
 		t.Errorf("expected %d dropped in stats, got %d", dropped, stats.BatchesDropped)
 	}
+	// LastError is a string on the wire, not an error, so this is a plain
+	// comparison against the message rather than errors.Is.
 	if stats.LastError != ErrQueueFull.Error() {
 		t.Errorf("expected last error %q, got %q", ErrQueueFull, stats.LastError)
 	}
@@ -406,7 +409,7 @@ func TestHTTPExporter_Export_AfterClose(t *testing.T) {
 	}
 
 	err := exporter.Export(context.Background(), &metrics.Batch{CollectedAt: time.Now()})
-	if err != ErrClosed {
+	if !errors.Is(err, ErrClosed) {
 		t.Errorf("expected ErrClosed, got %v", err)
 	}
 }
@@ -426,7 +429,7 @@ func TestHTTPExporter_Export_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := exporter.Export(ctx, &metrics.Batch{CollectedAt: time.Now()}); err != context.Canceled {
+	if err := exporter.Export(ctx, &metrics.Batch{CollectedAt: time.Now()}); !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context.Canceled, got %v", err)
 	}
 }

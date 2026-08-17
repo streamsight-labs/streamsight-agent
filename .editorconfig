@@ -1,0 +1,24 @@
+# gofmt owns every .go file, so this exists for the other half of the repo:
+# Helm templates, Kubernetes manifests, GitHub workflows and two compose files.
+# YAML is whitespace-significant and nothing else in CI checks its indentation.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.go]
+indent_style = tab
+
+[*.{yml,yaml,tpl,json}]
+indent_style = space
+indent_size = 2
+
+[Makefile]
+indent_style = tab
+
+[*.md]
+# Two trailing spaces are a hard line break in Markdown.
+trim_trailing_whitespace = false

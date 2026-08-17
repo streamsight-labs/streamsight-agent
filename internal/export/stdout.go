@@ -21,6 +21,7 @@ type StdoutExporter struct {
 	w  io.Writer
 }
 
+// NewStdoutExporter writes one JSON batch per line to stdout.
 func NewStdoutExporter() *StdoutExporter {
 	return newStreamExporter(os.Stdout)
 }
@@ -30,6 +31,7 @@ func newStreamExporter(w io.Writer) *StdoutExporter {
 	return &StdoutExporter{w: w}
 }
 
+// Export writes one batch as a single JSONL line.
 func (e *StdoutExporter) Export(ctx context.Context, batch *metrics.Batch) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -57,6 +59,7 @@ func (e *StdoutExporter) Export(ctx context.Context, batch *metrics.Batch) error
 	return nil
 }
 
+// Stats returns a snapshot of the exporter's counters.
 func (e *StdoutExporter) Stats() Stats {
 	return e.snapshot()
 }

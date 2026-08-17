@@ -26,14 +26,19 @@ type FileExporter struct {
 	path       string
 	maxBytes   int64
 	maxBackups int
+	sync       bool
 
-	mu     sync.Mutex
-	file   *os.File
-	w      *bufio.Writer
-	size   int64
-	closed bool
+	mu   sync.Mutex
+	file *os.File
+	w    *bufio.Writer
+	size int64
+	// needsReopen means a rotation completed its destructive backup shift but
+	// could not reopen the live file; only the reopen is retried.
+	needsReopen bool
+	closed      bool
 }
 
+// FileExporterConfig configures the JSONL file exporter.
 type FileExporterConfig struct {
 	// Path is the JSONL file. Parent directories are created as needed.
 	Path string
@@ -43,8 +48,14 @@ type FileExporterConfig struct {
 	// MaxBackups is how many rotated files to keep (<name>.1 … <name>.N).
 	// Negative uses the default; zero keeps none.
 	MaxBackups int
+	// Sync fsyncs after every batch. Off by default: a flush already survives
+	// process death, and only power loss or a kernel panic needs more.
+	Sync bool
 }
 
+// NewFileExporter opens the target file, creating parent directories as
+// needed. It fails at startup rather than on the first batch, so a bad path is
+// a refusal to start instead of a silent hole in the data.
 func NewFileExporter(cfg FileExporterConfig) (*FileExporter, error) {
 	if cfg.Path == "" {
 		return nil, errors.New("file exporter: path is required")
@@ -59,6 +70,7 @@ func NewFileExporter(cfg FileExporterConfig) (*FileExporter, error) {
 	e := &FileExporter{
 		path:       cfg.Path,
 		maxBackups: cfg.MaxBackups,
+		sync:       cfg.Sync,
 	}
 	if cfg.MaxMB > 0 {
 		e.maxBytes = int64(cfg.MaxMB) * 1024 * 1024
@@ -93,6 +105,18 @@ func (e *FileExporter) Export(ctx context.Context, batch *metrics.Batch) error {
 		return ErrClosed
 	}
 
+	// Finish a rotation that shifted the backups but could not reopen. Replaying
+	// the shift would consume one more backup generation every cycle and destroy
+	// all of them within maxBackups cycles, without writing a single batch.
+	if e.needsReopen {
+		if err := e.open(); err != nil {
+			e.dropped.Add(1)
+			e.recordError(err)
+			return err
+		}
+		e.needsReopen = false
+	}
+
 	// Rotate before writing so a batch is never split across two files. Never
 	// rotate an empty file: a single batch larger than maxBytes would other-
 	// wise rotate forever and still not fit.
@@ -118,15 +142,29 @@ func (e *FileExporter) Export(ctx context.Context, batch *metrics.Batch) error {
 		e.recordError(err)
 		return err
 	}
+	// A flush reaches the page cache, which survives the process dying but not
+	// the machine dying. fsync is opt-in because it costs a device round trip
+	// under the lock, and collection is synchronous: on a network volume a
+	// stalled fsync stalls collection itself.
+	if e.sync && e.file != nil {
+		if err := e.file.Sync(); err != nil {
+			e.dropped.Add(1)
+			err = fmt.Errorf("fsync %s: %w", e.path, err)
+			e.recordError(err)
+			return err
+		}
+	}
 
 	e.exported.Add(1)
 	return nil
 }
 
+// Stats returns a snapshot of the exporter's counters.
 func (e *FileExporter) Stats() Stats {
 	return e.snapshot()
 }
 
+// Close flushes and closes the file. It is safe to call twice.
 func (e *FileExporter) Close() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -201,7 +239,7 @@ func (e *FileExporter) rotate() error {
 		if err := os.Remove(e.path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove %s: %w", e.path, err)
 		}
-		return e.open()
+		return e.reopen()
 	}
 
 	oldest := backupPath(e.path, e.maxBackups)
@@ -221,7 +259,19 @@ func (e *FileExporter) rotate() error {
 		return fmt.Errorf("rotate %s: %w", e.path, err)
 	}
 
-	return e.open()
+	return e.reopen()
+}
+
+// reopen opens the live file after the backup shift has already happened. It
+// marks needsReopen first so a failure here (a full or read-only volume) is
+// retried as a bare reopen next cycle rather than replaying the shift.
+func (e *FileExporter) reopen() error {
+	e.needsReopen = true
+	if err := e.open(); err != nil {
+		return err
+	}
+	e.needsReopen = false
+	return nil
 }
 
 func backupPath(path string, n int) string {

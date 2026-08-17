@@ -1,0 +1,123 @@
+name: Bug report
+description: Something the agent does that it should not, or does not do that it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every batch carries a `sections[]` block saying which of the five
+        collection phases succeeded, and an `errors[]` block attributing each
+        failure to an API call, broker, topic, partition or group. Pasting
+        those two turns most reports into a one-round-trip diagnosis, so they
+        are asked for below.
+
+        **Do not report a security issue here.** `SECURITY.md` in the repository
+        root has the private channel; use the *Report a vulnerability* button
+        under the Security tab instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Agent version
+      description: >-
+        Output of `agent -version`, or the `agent_version` field from a batch.
+        "main" or a commit SHA is fine for an unreleased build.
+      placeholder: v0.1.0 / main-a1b2c3d
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kafka-flavor
+    attributes:
+      label: Kafka flavour
+      options:
+        - Self-hosted Apache Kafka (KRaft)
+        - Self-hosted Apache Kafka (ZooKeeper)
+        - Amazon MSK
+        - Amazon MSK Serverless
+        - Confluent Cloud
+        - Confluent Platform
+        - Redpanda
+        - Aiven
+        - Other (say which below)
+    validations:
+      required: true
+
+  - type: input
+    id: kafka-version
+    attributes:
+      label: Broker version
+      description: >-
+        The broker's version, not the client's. Several fields need a minimum
+        broker version to exist at all -- topic UUIDs need 2.8, committed
+        leader epochs need 2.1 -- so this is often the whole answer.
+      placeholder: "3.7.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: export-mode
+    attributes:
+      label: Export mode
+      options:
+        - file
+        - stdout
+        - http
+    validations:
+      required: true
+
+  - type: textarea
+    id: sections
+    attributes:
+      label: The batch's sections[] and errors[]
+      description: >-
+        From a batch that shows the problem. In file or stdout mode:
+        `jq -c '{sections, errors}' metrics.jsonl | tail -1`. A section
+        reporting `failed`, `partial` or `unauthorized` means "no data for this
+        phase", which is not the same as "no entities" -- so this block usually
+        distinguishes an agent bug from a permission or broker problem
+        immediately.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Agent logs
+      description: >-
+        stderr, ideally with `LOG_LEVEL=debug`. Credentials are redacted by the
+        agent, but check anyway before pasting.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: How it is deployed
+      description: >-
+        Helm chart, `deploy/k8s` manifests, container, or bare binary; and
+        anything unusual about the cluster (partition count, group count, SASL
+        mechanism, TLS, a proxy in front of the brokers).
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: acls
+    attributes:
+      label: Permissions
+      options:
+        - label: >-
+            The agent's principal has DESCRIBE on CLUSTER, TOPIC and GROUP
+            (see README.md), or I do not know and the sections block above may
+            answer it.
+          required: false

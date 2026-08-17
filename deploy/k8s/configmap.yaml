@@ -29,6 +29,9 @@ data:
   EXPORT_FILE: "/var/lib/streamsight/metrics.jsonl"
   EXPORT_FILE_MAX_MB: "100" # rotate at this size; negative disables rotation
   EXPORT_FILE_MAX_BACKUPS: "3" # rotated files kept; 0 keeps none
+  # fsync after every batch. Off by default: a flush already survives the
+  # process dying, and the emptyDir below dies with the pod anyway.
+  # EXPORT_FILE_FSYNC: "false"
 
   # HTTP mode. Uncomment these and set EXPORT_MODE=http.
   # EXPORT_ENDPOINT: "https://ingest.example.com/v1/batches"
@@ -49,6 +52,49 @@ data:
   # TOPIC_EXCLUDE_REGEX: "^_"
   # GROUP_INCLUDE_REGEX: ""
   # GROUP_EXCLUDE_REGEX: ""
+  # Broker-side group-state filter: Unknown | PreparingRebalance |
+  # CompletingRebalance | Stable | Dead | Empty, comma separated. The only
+  # cardinality control applied before the response is built, so filtered
+  # groups never cross the wire -- but it requires Kafka 2.6+, and the agent
+  # probes every broker at startup and REFUSES TO START if any is older,
+  # because an older broker ignores the filter and returns every group. It
+  # also shortens offsets[], and a group leaving the set looks deleted.
+  # GROUP_STATES: "Stable,Empty"
+
+  # -- Optional collectors ------------------------------------------------
+  # Neither needs an ACL beyond the three DESCRIBE grants.
+  #
+  # last_stable_offset: leave it on. end_offset is the high watermark, so
+  # without the LSO every read_committed consumer on a transactional topic
+  # reports permanent false lag, with nothing anywhere reporting a failure.
+  COLLECT_LAST_STABLE_OFFSET: "true"
+  # log_dirs: per-broker, per-directory replica bytes and offline-disk
+  # detection. Off by default because the response is O(replicas) = partitions
+  # x replication factor -- the largest payload the agent emits -- and it has
+  # never been run against more than a single broker. Set the MAX_* caps below
+  # before enabling it on a real cluster.
+  COLLECT_LOG_DIRS: "false"
+  # Cadence for the log-dirs phase. Must be >= 1 (1 = every cycle). Ten is
+  # five minutes at the default interval; disks fill over hours. Ignored when
+  # COLLECT_LOG_DIRS is false.
+  # LOG_DIRS_EVERY: "10"
+
+  # -- Cardinality caps ---------------------------------------------------
+  # Hard ceilings on one batch. Every ENTITY cap defaults to 0 = unlimited,
+  # deliberately: a non-zero default would silently shorten the customer's own
+  # inventory on first deploy. Prefer the include regexes above for
+  # intentional selection. None of these adds a request or an ACL, and each
+  # one that is set logs a startup warning.
+  #
+  # MAX_ERRORS backstops errors[], which is deduplicated unconditionally, so
+  # it essentially never fires. 0 = unlimited (and warns).
+  # MAX_ERRORS: "1000"
+  # MAX_ERROR_SAMPLES: "1"        # verbatim samples per distinct failure mode; >= 1
+  # MAX_TOPICS: "0"               # also shrinks the offset and log-dir requests
+  # MAX_PARTITIONS_PER_TOPIC: "0" # payload cap; also shrinks the log-dir request
+  # MAX_GROUPS: "0"               # ALSO truncates the offsets section, not just groups
+  # MAX_MEMBERS_PER_GROUP: "0"
+  # MAX_OFFSETS_PER_GROUP: "0"
 
   # -- Agent --------------------------------------------------------------
   LOG_LEVEL: "info" # debug | info | warn | error

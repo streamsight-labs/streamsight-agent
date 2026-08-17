@@ -14,10 +14,13 @@ import (
 	"kafka-metrics-agent/internal/metrics"
 )
 
-// Mode selects an exporter implementation. It is an alias for string so a
-// plain config field (cfg.ExportMode) can be assigned without a conversion.
+// Mode selects an exporter implementation. It aliases string so a config field
+// can be assigned without a conversion.
 type Mode = string
 
+// ModeFile, ModeHTTP and ModeStdout are the export modes. They mirror the
+// config.ExportMode* constants; config does not import this package, so the
+// dependency stays one-way.
 const (
 	ModeFile   Mode = "file"
 	ModeHTTP   Mode = "http"
@@ -33,18 +36,16 @@ var (
 	ErrClosed = errors.New("exporter is closed")
 )
 
-// Stats is the exporter's self-telemetry. The agent copies it into
-// metrics.AgentStats on every collection cycle so the backend can tell
-// "nothing to report" apart from "the pipe is broken".
+// Stats is the exporter's self-telemetry, copied into metrics.AgentStats every
+// cycle so the backend can tell "nothing to report" from "the pipe is broken".
 type Stats struct {
 	// BatchesExported is batches the destination accepted.
 	BatchesExported uint64
 	// BatchesDropped is batches lost: queue overflow, write failure, or
 	// retries exhausted.
 	BatchesDropped uint64
-	// BatchesRejected is batches the destination refused terminally (a
-	// non-retryable 4xx). These are a configuration or schema problem, not a
-	// transient one.
+	// BatchesRejected is batches refused terminally (a non-retryable 4xx): a
+	// configuration or schema problem, not a transient one.
 	BatchesRejected uint64
 	// ExportRetries counts retry attempts, not retried batches.
 	ExportRetries uint64
@@ -56,8 +57,7 @@ type Stats struct {
 	LastError string
 }
 
-// Exporter is the agent's only view of the export pipeline. All three
-// implementations satisfy it, so the agent can be tested against a fake.
+// Exporter is the agent's only view of the export pipeline.
 type Exporter interface {
 	// Export hands a batch to the exporter. It must not block on network or
 	// disk latency for longer than the collection interval; implementations
@@ -87,6 +87,8 @@ type Config struct {
 	Path       string
 	MaxMB      int
 	MaxBackups int
+	// Sync fsyncs the file after every batch (file mode only).
+	Sync bool
 }
 
 // New builds the exporter named by cfg.Mode.
@@ -117,6 +119,7 @@ func New(cfg Config) (Exporter, error) {
 			Path:       cfg.Path,
 			MaxMB:      cfg.MaxMB,
 			MaxBackups: cfg.MaxBackups,
+			Sync:       cfg.Sync,
 		})
 
 	case ModeStdout:
@@ -143,7 +146,7 @@ func encodeLine(batch *metrics.Batch) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-// counters is the atomic state behind Stats, embedded by every exporter.
+// counters is the state behind Stats, embedded by every exporter.
 type counters struct {
 	exported atomic.Uint64
 	dropped  atomic.Uint64

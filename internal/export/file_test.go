@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -305,7 +306,7 @@ func TestFileExporter_ExportAfterClose(t *testing.T) {
 		t.Errorf("second Close should be a no-op, got %v", err)
 	}
 
-	if err := e.Export(context.Background(), &metrics.Batch{}); err != ErrClosed {
+	if err := e.Export(context.Background(), &metrics.Batch{}); !errors.Is(err, ErrClosed) {
 		t.Errorf("expected ErrClosed, got %v", err)
 	}
 	s := e.Stats()
@@ -337,7 +338,7 @@ func TestFileExporter_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := e.Export(ctx, &metrics.Batch{}); err != context.Canceled {
+	if err := e.Export(ctx, &metrics.Batch{}); !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context.Canceled, got %v", err)
 	}
 	if lines := readLines(t, path); len(lines) != 0 {

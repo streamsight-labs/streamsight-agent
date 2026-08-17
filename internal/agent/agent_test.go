@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -15,8 +16,7 @@ import (
 )
 
 // fakeExporter records what the agent hands it and reports whatever Stats the
-// test wants. It exists to prove the agent depends on the export.Exporter
-// interface, not on *export.HTTPExporter.
+// test wants.
 type fakeExporter struct {
 	mu       sync.Mutex
 	batches  []metrics.Batch
@@ -135,8 +135,8 @@ func TestRunCycleStampsEnvelopeAndIncrementsBatchSeq(t *testing.T) {
 		}
 	}
 
-	// The exporter's counters must reach the wire, or "agent alive but pipe
-	// broken" is invisible at the backend.
+	// Without these counters on the wire, "agent alive but pipe broken" is
+	// invisible at the backend.
 	last := got[len(got)-1]
 	want := metrics.AgentStats{
 		UptimeSec:        last.Agent.UptimeSec,
@@ -228,6 +228,57 @@ func TestCloseIsNilSafeAndReportsExporterFailure(t *testing.T) {
 	}
 	if !exp.closed {
 		t.Fatal("exporter was not closed")
+	}
+}
+
+// Every collector option must actually come from config. GROUP_STATES was
+// plumbed all the way into ListGroups and then left out of this one mapping,
+// so it was dead while looking wired up from both ends. The reflection sweep
+// below is the guard against the next such omission.
+func TestCollectorOptionsCarryEveryConfiguredSetting(t *testing.T) {
+	cfg := &config.Config{
+		CollectionTimeout:     24 * time.Second,
+		IncludeInternalTopics: true,
+		TopicIncludeRegex:     "^orders",
+		TopicExcludeRegex:     "^orders-tmp",
+		GroupIncludeRegex:     "^svc-",
+		GroupExcludeRegex:     "^svc-canary",
+		GroupStates:           []string{"Stable", "Empty"},
+
+		CollectLastStableOffset: true,
+		CollectConsumerGroups:   true,
+		CollectLogDirs:          true,
+		LogDirsEvery:            7,
+
+		MaxErrors:             11,
+		MaxErrorSamples:       2,
+		MaxTopics:             3,
+		MaxPartitionsPerTopic: 4,
+		MaxGroups:             5,
+		MaxMembersPerGroup:    6,
+		MaxOffsetsPerGroup:    8,
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	opts := collectorOptions(cfg, logger)
+
+	if !reflect.DeepEqual(opts.GroupStates, cfg.GroupStates) {
+		t.Errorf("GroupStates = %v, want %v", opts.GroupStates, cfg.GroupStates)
+	}
+	if opts.Timeout != cfg.CollectionTimeout {
+		t.Errorf("Timeout = %s, want %s", opts.Timeout, cfg.CollectionTimeout)
+	}
+	if opts.Limits.MaxGroups != cfg.MaxGroups || opts.Limits.MaxErrors != cfg.MaxErrors {
+		t.Errorf("Limits = %+v", opts.Limits)
+	}
+
+	// Every field above is deliberately non-zero, so a zero here means the
+	// mapping dropped it.
+	for _, v := range []reflect.Value{reflect.ValueOf(opts), reflect.ValueOf(opts.Limits)} {
+		for i := 0; i < v.NumField(); i++ {
+			if v.Field(i).IsZero() {
+				t.Errorf("%s.%s is zero: it is not mapped from config", v.Type().Name(), v.Type().Field(i).Name)
+			}
+		}
 	}
 }
 

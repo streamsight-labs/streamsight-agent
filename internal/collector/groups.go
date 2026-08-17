@@ -4,19 +4,25 @@ import (
 	"context"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kadm"
+
 	"kafka-metrics-agent/internal/metrics"
 )
 
-// listGroups performs the one all-broker ListGroups broadcast of the cycle.
-// Both the groups and offsets phases consume its result; issuing it twice
-// doubled the fan-out for no new information.
+// listGroups performs the one all-broker ListGroups broadcast of the cycle,
+// shared by the groups and offsets phases. The error is returned rather than
+// recorded so each consuming section can attribute it to itself.
 //
-// The error is returned rather than recorded so each consuming section can
-// attribute it to itself — a listing failure degrades both.
-func (c *Collector) listGroups(ctx context.Context) ([]string, error) {
+// MaxGroups is enforced here and nowhere else. One enforcement point shrinks
+// both the DescribeGroups and the FetchManyOffsets fan-out, and guarantees
+// groups[] and offsets[] describe the SAME set of groups; capping independently
+// in each phase would let the two sections disagree about which groups exist —
+// a data integrity bug, not a payload one. listed.Sorted() makes the retained
+// prefix the same set every cycle.
+func (c *Collector) listGroups(ctx context.Context) (ids []string, dropped int, err error) {
 	listed, err := c.client.Admin.ListGroups(ctx, c.opts.GroupStates...)
 
-	ids := make([]string, 0, len(listed))
+	ids = make([]string, 0, len(listed))
 	for _, g := range listed.Sorted() {
 		if isInternalGroup(g.Group) {
 			continue
@@ -26,15 +32,21 @@ func (c *Collector) listGroups(ctx context.Context) ([]string, error) {
 		}
 		ids = append(ids, g.Group)
 	}
-	return ids, err
+	keep, dropped := capLen(len(ids), c.limits.MaxGroups)
+	return ids[:keep], dropped, err
 }
 
 // collectGroups describes every listed group. listedAt is when the shared
-// ListGroups call was issued, so the section's SampledAt covers the whole
-// phase including the listing.
-func (c *Collector) collectGroups(ctx context.Context, ids []string, listErr error, listedAt time.Time) ([]metrics.GroupMetrics, *section) {
-	sec := newSectionAt(sectionGroups, listedAt)
+// ListGroups call was issued, so SampledAt covers the listing too. listDropped
+// is how many groups MaxGroups removed: the count is reported once at batch
+// level, but this section must still admit it is short.
+func (c *Collector) collectGroups(ctx context.Context, ids []string, listDropped int, listErr error, listedAt time.Time) ([]metrics.GroupMetrics, *section) {
+	sec := c.newSectionAt(sectionGroups, listedAt)
 	defer sec.stop()
+
+	if listDropped > 0 {
+		sec.truncated = true
+	}
 
 	sec.request("ListGroups", listErr)
 	if len(ids) == 0 {
@@ -66,8 +78,17 @@ func (c *Collector) collectGroups(ctx context.Context, ids []string, listErr err
 			sec.recordGroup("DescribeGroups", g.Group, g.Err)
 		}
 
-		members := make([]metrics.GroupMember, 0, len(g.Members))
-		for _, m := range g.Members {
+		// kadm sorts DescribedGroup.Members by InstanceID (nil last) then
+		// MemberID (kadm@v1.18.0 groups.go:401), so the retained prefix is
+		// stable across cycles without sorting here.
+		keep, droppedMembers := capLen(len(g.Members), c.limits.MaxMembersPerGroup)
+		if droppedMembers > 0 {
+			sec.dropped.Members += droppedMembers
+			sec.truncated = true
+		}
+
+		members := make([]metrics.GroupMember, 0, keep)
+		for _, m := range g.Members[:keep] {
 			member := metrics.GroupMember{
 				MemberID:   m.MemberID,
 				InstanceID: m.InstanceID,
@@ -76,8 +97,8 @@ func (c *Collector) collectGroups(ctx context.Context, ids []string, listErr err
 				Assignment: make([]metrics.TopicPartition, 0),
 			}
 
-			// Join metadata: what the member asked for, plus the generation and
-			// what it still claims to own under cooperative rebalancing.
+			// Join metadata: what the member asked for, the generation, and what
+			// it still claims to own under cooperative rebalancing.
 			if join, ok := m.Join.AsConsumer(); ok {
 				member.SubscribedTopics = join.Topics
 				member.Rack = join.Rack
@@ -94,7 +115,6 @@ func (c *Collector) collectGroups(ctx context.Context, ids []string, listErr err
 				}
 			}
 
-			// Assignment: what the leader handed it.
 			if assigned, ok := m.Assigned.AsConsumer(); ok {
 				for _, t := range assigned.Topics {
 					for _, p := range t.Partitions {
@@ -109,10 +129,110 @@ func (c *Collector) collectGroups(ctx context.Context, ids []string, listErr err
 			members = append(members, member)
 		}
 
-		gm.MemberCount = len(members)
+		// The PRE-truncation count, so len(members) < member_count says the
+		// member list was cut. Generation is derived from the emitted members, so
+		// a truncated group under-reports it — one more reason
+		// MaxMembersPerGroup defaults to unlimited.
+		gm.MemberCount = len(g.Members)
 		gm.Members = members
 		groups = append(groups, gm)
 	}
 
+	c.enrichConsumerGroups(ctx, sec, groups)
+
 	return groups, sec
+}
+
+// enrichConsumerGroups overlays ConsumerGroupDescribe (KIP-848) data onto groups
+// that DescribeGroups has already shaped.
+//
+// It is an overlay, not a replacement: DescribeGroups answers for every group on
+// every broker version, while this call answers only for new-protocol groups on
+// Kafka 4.0+, so the classic path stays authoritative.
+//
+// Groups are named explicitly rather than letting kadm discover them: passing no
+// groups makes it call ListGroupsByType, whose TypesFilter franz-go silently
+// drops when downgrading, which would quietly describe the wrong set.
+func (c *Collector) enrichConsumerGroups(ctx context.Context, sec *section, groups []metrics.GroupMetrics) {
+	if !c.opts.CollectConsumerGroups || len(groups) == 0 {
+		return
+	}
+
+	ids := make([]string, 0, len(groups))
+	for _, g := range groups {
+		ids = append(ids, g.ID)
+	}
+
+	described, err := c.client.Admin.DescribeConsumerGroups(ctx, ids...)
+	// kadm aborts a whole shard on the first GROUP_AUTHORIZATION_FAILED, so one
+	// denied group would otherwise discard every other group's epochs.
+	if !sec.requestPartial("ConsumerGroupDescribe", err, len(described) > 0) {
+		return
+	}
+
+	for i := range groups {
+		d, ok := described[groups[i].ID]
+		if !ok {
+			continue
+		}
+		// A per-group error here is the ORDINARY case, not a failure: the
+		// coordinator answers GROUP_ID_NOT_FOUND for every classic-protocol
+		// group. Recording it would emit one error per classic group per cycle,
+		// forever, describing nothing wrong.
+		if d.Err != nil {
+			continue
+		}
+		applyConsumerGroup(&groups[i], d)
+	}
+}
+
+// applyConsumerGroup overlays one ConsumerGroupDescribe result onto the group
+// the classic describe already shaped. It is separate from the request so the
+// merge rules are testable without a Kafka client.
+func applyConsumerGroup(gm *metrics.GroupMetrics, d kadm.DescribedConsumerGroup) {
+	epoch, assignmentEpoch := d.Epoch, d.AssignmentEpoch
+	gm.GroupEpoch = &epoch
+	gm.AssignmentEpoch = &assignmentEpoch
+	gm.Assignor = d.AssignorName
+
+	byID := make(map[string]kadm.ConsumerGroupMember, len(d.Members))
+	for _, m := range d.Members {
+		byID[m.MemberID] = m
+	}
+	// Iterate the members already emitted, so MaxMembersPerGroup still bounds the
+	// list and the two describes cannot disagree about which members exist.
+	for j := range gm.Members {
+		m, ok := byID[gm.Members[j].MemberID]
+		if !ok {
+			continue
+		}
+		memberEpoch := m.MemberEpoch
+		gm.Members[j].MemberEpoch = &memberEpoch
+		gm.Members[j].SubscribedTopicRegex = m.SubscribedTopicRegex
+		gm.Members[j].TargetAssignment = topicsSetToPartitions(m.TargetAssignment)
+		if len(gm.Members[j].SubscribedTopics) == 0 {
+			gm.Members[j].SubscribedTopics = m.SubscribedTopics
+		}
+		// The classic describe leaves Assignment empty for a new-protocol
+		// member: there is no consumer-protocol join metadata to decode.
+		if len(gm.Members[j].Assignment) == 0 {
+			gm.Members[j].Assignment = topicsSetToPartitions(m.Assignment)
+		}
+	}
+}
+
+// topicsSetToPartitions flattens kadm's topic->partitions map into the wire's
+// sorted pair list. TopicsSet is a map, so Sorted() is what keeps the output
+// stable across cycles instead of following Go's map order.
+func topicsSetToPartitions(ts kadm.TopicsSet) []metrics.TopicPartition {
+	if len(ts) == 0 {
+		return nil
+	}
+	out := make([]metrics.TopicPartition, 0, len(ts))
+	for _, tp := range ts.Sorted() {
+		for _, p := range tp.Partitions {
+			out = append(out, metrics.TopicPartition{Topic: tp.Topic, Partition: p})
+		}
+	}
+	return out
 }

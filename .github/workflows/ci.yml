@@ -7,6 +7,14 @@ on:
   push:
     branches:
       - '**'
+    # Tags too, and this is not redundant with the branch glob: a `v*` tag push
+    # is its own event, and without this line the Docker and Release workflows
+    # would build and publish from a ref at which the suite had never run. They
+    # still run in parallel with this workflow rather than after it -- fixing
+    # that properly needs a workflow_run gate -- but a red CI on the release
+    # commit is at least visible before the artifact is announced.
+    tags:
+      - 'v*'
   pull_request:
 
 permissions:
@@ -53,8 +61,76 @@ jobs:
 
       # -race is the point: the collector fans out five goroutines per cycle
       # and the exporters share counters across a worker.
+      #
+      # -covermode=atomic because -race demands it; the profile is only here to
+      # be reported, never to gate.
       - name: go test -race
-        run: go test -race ./...
+        run: go test -race -covermode=atomic -coverprofile=cover.out ./...
+
+      # Coverage as information, deliberately not as a threshold. A number that
+      # blocks a merge gets satisfied by tests written to move the number, and
+      # the parts of this agent that are actually hard to get right -- what a
+      # broker returns under a partial failure -- are the parts a unit test
+      # cannot reach at all. Printed where a reviewer sees it, and that is all.
+      - name: Coverage
+        run: |
+          {
+            echo "### Coverage"
+            echo ''
+            echo '```'
+            go tool cover -func=cover.out | tail -n 1
+            echo '```'
+            echo ''
+            echo '<details><summary>Per function</summary>'
+            echo ''
+            echo '```'
+            go tool cover -func=cover.out
+            echo '```'
+            echo ''
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Non-blocking on purpose. govulncheck reports against Go's advisory
+      # database, which moves on Go's schedule and not on this repo's: a stdlib
+      # advisory published overnight would otherwise redden a PR that changed a
+      # comment. The finding still has to be seen, so it goes to the run
+      # summary rather than into a log nobody opens.
+      #
+      # @latest rather than a pinned scanner: the whole value is freshness, and
+      # pinning govulncheck pins its idea of which vulnerabilities exist. It is
+      # `go run`, so nothing enters go.mod.
+      - name: govulncheck (informational)
+        continue-on-error: true
+        run: |
+          {
+            echo "### govulncheck"
+            echo ''
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          go run golang.org/x/vuln/cmd/govulncheck@latest ./... 2>&1 \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          status=${PIPESTATUS[0]}
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The linter version is pinned: golangci-lint adds checks in minor
+      # releases, so floating it means an unrelated PR turns red because a new
+      # check landed that morning. Bumping it is a deliberate commit, and
+      # dependabot keeps the action itself current.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
 
   helm:
     name: Helm chart
@@ -158,14 +234,17 @@ jobs:
           cache-to: type=gha,mode=max
 
       # The version ldflag has to survive into the binary, or agent_version is
-      # empty on every batch the released image ships. The agent logs its
-      # version before it dials Kafka, then exits non-zero when the dial to
-      # nothing fails -- so the log line is available without a broker.
+      # empty on every batch the released image ships.
+      #
+      # `-version` is a real exit-0 path, so this asserts the exact string on
+      # stdout. It used to start the agent against a broker that does not
+      # exist, let the dial fail, and grep stderr for `version=` -- which
+      # asserted the ldflag only incidentally and would have kept passing if
+      # the value were wrong but non-empty.
       - name: Verify version ldflag and non-root user
         run: |
           test "$(docker run --rm --entrypoint id streamsight-agent:ci -u)" = "1000"
-          out="$(docker run --rm -e KAFKA_BROKERS=localhost:9092 \
-                   -e COLLECTION_INTERVAL=1s streamsight-agent:ci 2>&1 || true)"
+          out="$(docker run --rm streamsight-agent:ci -version)"
           echo "$out"
-          echo "$out" | grep -q "version=ci-${{ github.sha }}" \
+          echo "$out" | grep -qx "kafka-metrics-agent ci-${{ github.sha }}" \
             || { echo "::error::VERSION build-arg did not reach main.version"; exit 1; }

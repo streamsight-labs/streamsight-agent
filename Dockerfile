@@ -4,7 +4,7 @@
 # the target platform. A linux/amd64 + linux/arm64 build therefore costs two
 # native `go build` invocations rather than a QEMU-emulated Go toolchain per
 # architecture.
-FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 
 WORKDIR /src
 

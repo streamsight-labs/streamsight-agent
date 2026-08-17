@@ -95,6 +95,12 @@ export:
     maxMB: 100
     # EXPORT_FILE_MAX_BACKUPS -- rotated files kept. 0 keeps none.
     maxBackups: 3
+    # EXPORT_FILE_FSYNC -- fsync after every batch. Off by default: a flush
+    # already survives the process dying, and only power loss or a node crash
+    # needs a device round trip. Collection is synchronous, so on a networked
+    # volume a stalled fsync stalls collection itself. On the default emptyDir
+    # (node disk, gone with the pod anyway) it buys nothing.
+    fsync: false
     # emptyDir sizeLimit. Keep it above maxMB * (maxBackups + 1) or the kubelet
     # can evict the pod mid-rotation.
     sizeLimit: "1Gi"
@@ -116,6 +122,68 @@ collection:
   topicExcludeRegex: ""
   groupIncludeRegex: ""
   groupExcludeRegex: ""
+  # GROUP_STATES -- comma separated, e.g. "Stable,Empty". Empty means every
+  # state. Valid: Unknown, PreparingRebalance, CompletingRebalance, Stable,
+  # Dead, Empty (case-insensitive; an unrecognised state fails the pod).
+  #
+  # This is the only cardinality control the broker applies before building the
+  # response, so filtered groups never cross the wire -- but it needs
+  # Kafka 2.6+ (ListGroups v4). The agent probes every broker at startup and
+  # REFUSES TO START if any is older, because an older broker drops the filter
+  # silently and returns every group. Two more things it changes: it shortens
+  # offsets[] as well as groups[], and a group that leaves the filtered set is
+  # indistinguishable at the backend from a deleted one.
+  groupStates: ""
+
+  # COLLECT_LAST_STABLE_OFFSET -- adds partitions[].last_stable_offset.
+  # Leave it on. end_offset is the high watermark, so without the LSO every
+  # read_committed consumer on a transactional topic reports permanent false
+  # lag, silently. Costs one extra ListOffsets fan-out per cycle and no ACL.
+  collectLastStableOffset: true
+  # COLLECT_LOG_DIRS -- adds the log_dirs[] section: per-broker, per-directory
+  # replica bytes, per-replica lag and offline-disk detection. No ACL beyond
+  # the DESCRIBE on CLUSTER already required, but the response is O(replicas)
+  # = partitions x replication factor, the largest payload the agent emits, and
+  # it has never been run against more than a single broker. Size limits.* for
+  # the cluster before turning this on.
+  collectLogDirs: false
+  # LOG_DIRS_EVERY -- run the log-dirs phase every Nth cycle. Must be >= 1
+  # (1 = every cycle). Ten cycles is five minutes at the default interval;
+  # disks fill over hours. Rendered only when collectLogDirs is true.
+  logDirsEvery: 10
+
+# Cardinality caps: hard ceilings on what one batch may contain.
+#
+# Every ENTITY cap defaults to 0 = unlimited, and that is deliberate -- a
+# non-zero default would silently shorten the customer's own inventory on first
+# deploy. Use collection.topicIncludeRegex / groupIncludeRegex for intentional
+# selection; use these when you have measured the cluster and need a ceiling.
+# Setting any of them logs a startup warning. None of them adds a request or an
+# ACL. A cap left at 0 is not rendered into the ConfigMap at all.
+limits:
+  # MAX_ERRORS -- bounds errors[] per batch. 0 = unlimited (and warns).
+  # Errors are deduplicated unconditionally, so this backstop essentially
+  # never fires; when it does, whole-request and authorization failures are
+  # admitted ahead of the per-partition flood.
+  maxErrors: 1000
+  # MAX_ERROR_SAMPLES -- verbatim occurrences per distinct failure mode before
+  # the rest are folded into the exemplar's count. Must be >= 1.
+  maxErrorSamples: 1
+  # MAX_TOPICS -- also shrinks the request fan-out (the topic list sent to the
+  # offset listings and to DescribeLogDirs).
+  maxTopics: 0
+  # MAX_PARTITIONS_PER_TOPIC -- payload cap for the offset listings (the broker
+  # computes every partition regardless), but it does shrink the log-dirs
+  # request, whose partitions are named on the wire.
+  maxPartitionsPerTopic: 0
+  # MAX_GROUPS -- enforced once on the shared ListGroups result, so it shrinks
+  # the DescribeGroups and OffsetFetch fan-out AND truncates the offsets
+  # section, not just groups.
+  maxGroups: 0
+  # MAX_MEMBERS_PER_GROUP
+  maxMembersPerGroup: 0
+  # MAX_OFFSETS_PER_GROUP
+  maxOffsetsPerGroup: 0
 
 agent:
   # LOG_LEVEL -- debug | info | warn | error. Logs go to stderr, so stdout

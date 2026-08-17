@@ -34,9 +34,8 @@ const (
 )
 
 // HTTPExporter POSTs one Batch per request to the global ingest endpoint. A
-// bounded queue and a single worker keep collection off the network path:
-// collection never blocks, and an overflowing queue drops the newest batch
-// rather than stalling the agent.
+// bounded queue and a single worker keep collection off the network path: an
+// overflowing queue drops the newest batch rather than stalling the agent.
 type HTTPExporter struct {
 	counters
 
@@ -66,6 +65,7 @@ type HTTPExporter struct {
 	rnd   *rand.Rand
 }
 
+// HTTPExporterConfig configures the HTTP exporter.
 type HTTPExporterConfig struct {
 	Endpoint   string
 	APIKey     string
@@ -78,11 +78,15 @@ type HTTPExporterConfig struct {
 	Gzip bool
 }
 
+// NewHTTPExporter builds the exporter and starts its single worker. Only a
+// negative MaxRetries means "unset": zero means "do not retry", for operators
+// who would rather drop a batch than let a wedged ingest occupy the single
+// export worker for the length of the backoff schedule.
 func NewHTTPExporter(cfg HTTPExporterConfig) *HTTPExporter {
 	if cfg.QueueSize <= 0 {
 		cfg.QueueSize = defaultQueueSize
 	}
-	if cfg.MaxRetries <= 0 {
+	if cfg.MaxRetries < 0 {
 		cfg.MaxRetries = defaultMaxRetries
 	}
 	if cfg.BaseDelay <= 0 {
@@ -107,7 +111,9 @@ func NewHTTPExporter(cfg HTTPExporterConfig) *HTTPExporter {
 		baseDelay:     cfg.BaseDelay,
 		timeout:       cfg.Timeout,
 		shutdownGrace: 2 * cfg.Timeout,
-		rnd:           rand.New(rand.NewSource(time.Now().UnixNano())),
+		// Jitter only, so many agents do not retry against a degraded ingest in
+		// lockstep. Nothing here is a secret.
+		rnd: rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // G404: jitter, not cryptography
 	}
 
 	e.wg.Add(1)
@@ -120,14 +126,14 @@ func NewHTTPExporter(cfg HTTPExporterConfig) *HTTPExporter {
 // or unreachable ingest must never stall collection, so a full queue drops the
 // batch and reports it in Stats.
 func (e *HTTPExporter) Export(ctx context.Context, batch *metrics.Batch) error {
-	// Checked up front, because the enqueue below cannot block and so could
-	// never observe cancellation on its own.
+	// Checked up front: the enqueue below cannot block, so it could never
+	// observe cancellation on its own.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	// Held for the duration of the send so Close cannot begin draining while
-	// a batch is halfway onto the queue.
+	// Held across the enqueue so Close cannot begin draining while a batch is
+	// halfway onto the queue.
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -148,6 +154,7 @@ func (e *HTTPExporter) Export(ctx context.Context, batch *metrics.Batch) error {
 	}
 }
 
+// Stats returns a snapshot of the exporter's counters.
 func (e *HTTPExporter) Stats() Stats {
 	s := e.snapshot()
 	s.QueueDepth = len(e.queue)
@@ -311,8 +318,8 @@ func (e *HTTPExporter) send(batch *metrics.Batch) error {
 		return fmt.Errorf("send request: %w", err)
 	}
 
-	// Drain before closing: an unread body forces the transport to tear down
-	// the connection instead of returning it to the keep-alive pool.
+	// Drain before closing: an unread body makes the transport tear down the
+	// connection instead of returning it to the keep-alive pool.
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, errBodyLimit))
 	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()

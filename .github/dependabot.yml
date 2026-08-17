@@ -1,0 +1,51 @@
+version: 2
+
+updates:
+  # Go modules. The tree is two direct dependencies and four indirect ones, so
+  # a weekly cadence produces roughly one PR a month rather than noise.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+    open-pull-requests-limit: 5
+    commit-message:
+      # Matches the repository's one-line conventional-commit rule; without
+      # this dependabot writes "Bump x from a to b" with a body.
+      prefix: deps
+    groups:
+      # franz-go, kadm and kmsg are released together and their APIs move
+      # together -- kadm calls into kmsg types that the agent also names. A PR
+      # that bumps one of the three in isolation is a PR that fails to build,
+      # so they are always one update.
+      franz-go:
+        patterns:
+          - github.com/twmb/franz-go
+          - github.com/twmb/franz-go/pkg/*
+      # Everything else is transitive and low-risk; batching keeps it to one
+      # review rather than four.
+      indirect:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - github.com/twmb/franz-go
+          - github.com/twmb/franz-go/pkg/*
+
+  # Actions rot in the other direction: they float on mutable major tags, so
+  # the risk is not that they break but that a stale one stops receiving fixes.
+  # One grouped PR a week, because eleven separate action bumps is how a repo
+  # learns to ignore the bot.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns:
+          - "*"

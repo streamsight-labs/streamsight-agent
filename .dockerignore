@@ -1,0 +1,20 @@
+# Docker does not read .gitignore, and Dockerfile's `COPY . .` uploads whatever
+# is left here into the daemon's build context. Without this file that means
+# .git, .idea/ and a ~13 MB bin/kafka-metrics-agent on every build, which both
+# costs upload time and busts the COPY layer cache on commits that touch no Go
+# source at all.
+#
+# Deny-everything-then-allow, rather than a list of things to exclude: the build
+# needs exactly four paths and nothing else, so anything added to the repo in
+# future -- a fixture directory, a vendored dashboard, a credentials file
+# someone drops in by accident -- stays out of the context by default instead of
+# having to be remembered here. Adding a new top-level Go source directory does
+# require a line below, but the failure mode is a loud "no required module
+# provides package" at build time, not a silently fat image.
+*
+
+# The dependency layer (`COPY go.mod go.sum ./`) and the compile.
+!go.mod
+!go.sum
+!cmd
+!internal

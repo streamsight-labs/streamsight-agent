@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1
+
+# Separate from the release Dockerfile on purpose. docker.yml and release.yml
+# build that one with no --target, so its final stage must stay the agent
+# runtime; adding a stage there for a test-only binary is a release-path risk
+# for no gain. The build context is the repo root (compose sets context: ..).
+
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+    go build -trimpath -ldflags "-s -w" -o /out/mock-ingest ./cmd/mock-ingest
+
+# alpine rather than scratch so busybox wget can serve the compose healthcheck.
+FROM alpine:3.19
+
+COPY --from=builder /out/mock-ingest /usr/local/bin/mock-ingest
+
+EXPOSE 8088
+
+ENTRYPOINT ["mock-ingest"]

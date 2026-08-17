@@ -5,6 +5,20 @@
 #
 # Pull requests do not push; .github/workflows/ci.yml builds the image without
 # pushing so a broken Dockerfile is caught before it reaches a tag.
+#
+# The split below is borrowed from datadog-agent's pipeline, which separates
+# "deploy_containers" from "deploy_mutable_image_tags", and it exists for two
+# reasons:
+#
+#   1. Build once, promote by digest. `promote` never rebuilds -- it retags the
+#      exact manifest `build` produced. Rebuilding from source at tag time would
+#      ship an artifact that is not the one CI tested, even at the same commit.
+#   2. Immutable tags land immediately; MUTABLE tags do not. :latest and the
+#      floating :MAJOR.MINOR are what running clusters follow
+#      (deploy/k8s/deployment.yaml pins :latest), so this workflow never writes
+#      them. Moving them is a separate, manually-triggered run: see
+#      .github/workflows/promote.yml, which explains why the gate is a manual
+#      dispatch rather than an `environment:` approval.
 name: Docker
 
 on:
@@ -26,6 +40,11 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      # The index digest of what was pushed, including the attestation
+      # manifests. promote retags this exact object.
+      digest: ${{ steps.build.outputs.digest }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -62,19 +81,19 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
-          # latest=auto: a semver tag also publishes :latest, which is what
-          # deploy/k8s/deployment.yaml points at. A main build does not.
+          # IMMUTABLE tags only. latest=false and no {{major}}.{{minor}} here:
+          # both of those move between releases, so they belong to promote.
           flavor: |
-            latest=auto
+            latest=false
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
             type=ref,event=branch
             type=sha,format=short
           labels: |
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -84,5 +103,11 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
+          # BuildKit generates both natively. They turn the pushed tag into an
+          # OCI index carrying attestation manifests, which GHCR serves fine --
+          # but it is the reason promote must retag by digest rather than
+          # rebuild, or the attestations would not follow the tag.
+          provenance: true
+          sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max

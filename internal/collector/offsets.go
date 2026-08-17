@@ -8,12 +8,19 @@ import (
 
 // collectOffsets fetches committed offsets for every listed group.
 //
-// This phase runs BEFORE end offsets are listed. Both halves of lag are
-// sampled at different instants; taking the committed half first means the
-// end offset is the fresher number and lag errs high instead of going negative.
-func (c *Collector) collectOffsets(ctx context.Context, ids []string, listErr error, internal map[string]bool) ([]metrics.ConsumerOffset, *section) {
-	sec := newSection(sectionOffsets)
+// This phase runs BEFORE end offsets are listed. Both halves of lag are sampled
+// at different instants; taking the committed half first means the end offset is
+// the fresher number and lag errs high instead of going negative.
+//
+// listDropped is how many groups MaxGroups removed from the shared listing, so
+// this section reports itself truncated by exactly as much as groups[] does.
+func (c *Collector) collectOffsets(ctx context.Context, ids []string, listDropped int, listErr error, internal map[string]bool) ([]metrics.ConsumerOffset, *section) {
+	sec := c.newSection(sectionOffsets)
 	defer sec.stop()
+
+	if listDropped > 0 {
+		sec.truncated = true
+	}
 
 	sec.request("ListGroups", listErr)
 	if len(ids) == 0 {
@@ -32,9 +39,8 @@ func (c *Collector) collectOffsets(ctx context.Context, ids []string, listErr er
 			continue
 		}
 		if resp.Err != nil {
-			// Emit the group carrying its error code, with nil Offsets. A
-			// coordinator that will not answer must not read as a group that
-			// has committed nothing.
+			// Emitted with its error code and nil Offsets: a coordinator that
+			// will not answer must not read as a group that committed nothing.
 			sec.recordGroup("OffsetFetch", id, resp.Err)
 			result = append(result, metrics.ConsumerOffset{
 				GroupID:   id,
@@ -44,11 +50,19 @@ func (c *Collector) collectOffsets(ctx context.Context, ids []string, listErr er
 		}
 
 		offsets := make([]metrics.PartitionOffset, 0, len(resp.Fetched))
+		emitted, dropped := 0, 0
 		for _, o := range resp.Fetched.Sorted() {
 			if internal[o.Topic] && !c.opts.IncludeInternalTopics {
 				continue
 			}
 			if !c.topics.allow(o.Topic) {
+				continue
+			}
+			// The cap counts EMITTED offsets, so a filtered topic never consumes
+			// budget. `continue` rather than `break`: the loop must keep counting
+			// to produce a true offset_count.
+			if ceiling := c.limits.MaxOffsetsPerGroup; ceiling > 0 && emitted >= ceiling {
+				dropped++
 				continue
 			}
 
@@ -64,11 +78,19 @@ func (c *Collector) collectOffsets(ctx context.Context, ids []string, listErr er
 				sec.recordPartition("OffsetFetch", o.Topic, o.Partition, o.Err)
 			}
 			offsets = append(offsets, po)
+			emitted++
+		}
+		if dropped > 0 {
+			sec.dropped.Offsets += dropped
+			sec.truncated = true
 		}
 
 		result = append(result, metrics.ConsumerOffset{
 			GroupID: id,
 			Offsets: offsets,
+			// The true post-filter, pre-cap count. offsets[] is the only entity
+			// list with no other count to compare len() against.
+			OffsetCount: emitted + dropped,
 		})
 	}
 
@@ -77,10 +99,10 @@ func (c *Collector) collectOffsets(ctx context.Context, ids []string, listErr er
 
 // nullableOffset maps a broker-reported offset onto the wire representation.
 //
-// A negative offset is not an offset. For a commit it means "this group has
-// never committed here"; clamping it to 0 reports the entire retained backlog
-// as lag for every new or reset group. For a listing it means the lookup
-// failed. Both must travel as null.
+// A negative offset is not an offset: for a commit it means "never committed
+// here", and clamping it to 0 reports the entire retained backlog as lag for
+// every new or reset group. For a listing it means the lookup failed. Both must
+// travel as null.
 func nullableOffset(v int64, err error) *int64 {
 	if err != nil || v < 0 {
 		return nil

@@ -73,7 +73,7 @@ func TestStdoutExporter_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := e.Export(ctx, &metrics.Batch{}); err != context.Canceled {
+	if err := e.Export(ctx, &metrics.Batch{}); !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context.Canceled, got %v", err)
 	}
 	if buf.Len() != 0 {

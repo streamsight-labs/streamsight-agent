@@ -1,0 +1,132 @@
+agent metrics.AgentStats
+agent.batches_collected uint64
+agent.batches_dropped uint64
+agent.batches_exported uint64
+agent.batches_rejected uint64
+agent.export_retries uint64
+agent.last_export_error string omitempty
+agent.queue_depth int
+agent.uptime_sec int64
+agent_instance_id string
+agent_version string
+batch_seq uint64
+cluster metrics.ClusterMetrics
+cluster.broker_count int
+cluster.brokers []metrics.Broker
+cluster.brokers[].host string
+cluster.brokers[].id int32
+cluster.brokers[].port int32
+cluster.brokers[].rack *string nullable omitempty
+cluster.controller int32
+cluster.id string
+collected_at time.Time
+collection_ms int64
+errors []metrics.CollectionError omitempty
+errors[].api string omitempty
+errors[].broker_id *int32 nullable omitempty
+errors[].count int omitempty
+errors[].dir string omitempty
+errors[].group string omitempty
+errors[].kafka_error_code int16 omitempty
+errors[].kind string omitempty
+errors[].message string
+errors[].partition *int32 nullable omitempty
+errors[].section string
+errors[].topic string omitempty
+groups []metrics.GroupMetrics
+groups[].assignment_epoch *int32 nullable omitempty
+groups[].assignor string omitempty
+groups[].coordinator int32
+groups[].error_code int16 omitempty
+groups[].generation int32
+groups[].group_epoch *int32 nullable omitempty
+groups[].id string
+groups[].member_count int
+groups[].members []metrics.GroupMember
+groups[].members[].assignment []metrics.TopicPartition
+groups[].members[].assignment[].partition int32
+groups[].members[].assignment[].topic string
+groups[].members[].client_id string
+groups[].members[].host string
+groups[].members[].instance_id *string nullable omitempty
+groups[].members[].member_epoch *int32 nullable omitempty
+groups[].members[].member_id string
+groups[].members[].owned []metrics.TopicPartition omitempty
+groups[].members[].owned[].partition int32
+groups[].members[].owned[].topic string
+groups[].members[].rack *string nullable omitempty
+groups[].members[].subscribed_topic_regex *string nullable omitempty
+groups[].members[].subscribed_topics []string omitempty
+groups[].members[].target_assignment []metrics.TopicPartition omitempty
+groups[].members[].target_assignment[].partition int32
+groups[].members[].target_assignment[].topic string
+groups[].protocol string omitempty
+groups[].protocol_type string omitempty
+groups[].state string
+limits *metrics.Limits nullable omitempty
+limits.max_error_samples int omitempty
+limits.max_errors int omitempty
+limits.max_groups int omitempty
+limits.max_members_per_group int omitempty
+limits.max_offsets_per_group int omitempty
+limits.max_partitions_per_topic int omitempty
+limits.max_topics int omitempty
+log_dirs []metrics.LogDir omitempty
+log_dirs[].broker int32
+log_dirs[].dir string
+log_dirs[].error_code int16 omitempty
+log_dirs[].partitions []metrics.LogDirPartition
+log_dirs[].partitions[].is_future bool omitempty
+log_dirs[].partitions[].offset_lag int64
+log_dirs[].partitions[].partition int32
+log_dirs[].partitions[].size int64
+log_dirs[].partitions[].topic string
+log_dirs[].total_bytes *int64 nullable
+log_dirs[].usable_bytes *int64 nullable
+offsets []metrics.ConsumerOffset
+offsets[].error_code int16 omitempty
+offsets[].group_id string
+offsets[].offset_count int
+offsets[].offsets []metrics.PartitionOffset
+offsets[].offsets[].error_code int16 omitempty
+offsets[].offsets[].leader_epoch int32
+offsets[].offsets[].metadata string omitempty
+offsets[].offsets[].offset *int64 nullable
+offsets[].offsets[].partition int32
+offsets[].offsets[].topic string
+schema_version int
+sections []metrics.Section
+sections[].duration_ms int64
+sections[].error_count int omitempty
+sections[].errors_collapsed int omitempty
+sections[].errors_dropped int omitempty
+sections[].name string
+sections[].sampled_at time.Time
+sections[].status metrics.SectionStatus
+sections[].truncated bool omitempty
+topics []metrics.TopicMetrics
+topics[].error_code int16 omitempty
+topics[].id string omitempty
+topics[].internal bool
+topics[].name string
+topics[].partition_count int
+topics[].partitions []metrics.Partition
+topics[].partitions[].end_offset *int64 nullable
+topics[].partitions[].error_code int16 omitempty
+topics[].partitions[].id int32
+topics[].partitions[].isr []int32
+topics[].partitions[].last_stable_offset *int64 nullable
+topics[].partitions[].leader int32
+topics[].partitions[].leader_epoch int32
+topics[].partitions[].offline_replicas []int32 omitempty
+topics[].partitions[].replicas []int32
+topics[].partitions[].start_offset *int64 nullable
+topics[].replication_factor int
+truncation *metrics.Truncation nullable omitempty
+truncation.errors_collapsed int omitempty
+truncation.errors_dropped int omitempty
+truncation.groups int omitempty
+truncation.members int omitempty
+truncation.offsets int omitempty
+truncation.partitions int omitempty
+truncation.topics int omitempty

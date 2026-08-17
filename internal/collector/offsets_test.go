@@ -44,13 +44,14 @@ func TestNullableOffsetCopiesValue(t *testing.T) {
 	v := int64(7)
 	got := nullableOffset(v, nil)
 	v = 9
+	_ = v
 	if *got != 7 {
 		t.Errorf("got %d, want 7 — the offset aliased its source", *got)
 	}
 }
 
 func TestNullOffsetsSerializeAsNull(t *testing.T) {
-	// The wire contract: a failed lookup must be visibly absent, not 0.
+	// A failed lookup must be visibly absent on the wire, not 0.
 	po := metrics.PartitionOffset{Topic: "orders", Partition: 0, Offset: nullableOffset(-1, nil)}
 	data, err := json.Marshal(po)
 	if err != nil {

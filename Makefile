@@ -7,8 +7,20 @@ BIN     := bin/$(APP)
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION)
 
-.PHONY: all build version run run-stdout test test-race vet fmt fmt-check check clean \
-        test-local-up test-local-down test-local-logs test-local-restart
+# The mock ingest is a test tool. It ships in no release artifact: the
+# Dockerfile and release.yml both build ./cmd/agent by explicit path.
+MOCK_PKG     := ./cmd/mock-ingest
+MOCK_BIN     := bin/mock-ingest
+COMPOSE_HTTP := docker compose -f docker-compose.yml -f docker-compose.http.yml
+
+# Pinned to match .github/workflows/ci.yml: golangci-lint adds checks in minor
+# releases, so a floating local install disagrees with CI at the worst moment.
+GOLANGCI_VERSION := v2.12.2
+
+.PHONY: all build version run run-stdout test test-race vet fmt fmt-check lint cover check clean \
+        test-local-up test-local-down test-local-logs test-local-restart \
+        build-mock run-mock run-http test-http test-http-up test-http-down \
+        test-http-logs test-http-restart test-http-verify
 
 all: check build
 
@@ -52,10 +64,20 @@ fmt-check:
 	@out="$$(gofmt -l .)"; \
 	if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
 
+lint:
+	@command -v golangci-lint >/dev/null 2>&1 \
+		|| { echo "golangci-lint not installed: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)"; exit 1; }
+	golangci-lint run ./...
+
+# Coverage as information, never a gate — the same calibration as CI.
+cover:
+	go test -race -covermode=atomic -coverprofile=cover.out ./...
+	go tool cover -func=cover.out | tail -n 1
+
 check: fmt-check vet test
 
 clean:
-	rm -rf bin/
+	rm -rf bin/ cover.out
 
 # Local test environment with SASL/ACLs
 test-local-up:
@@ -69,3 +91,48 @@ test-local-logs:
 
 test-local-restart:
 	cd test && docker compose restart agent
+
+build-mock:
+	go build -o $(MOCK_BIN) $(MOCK_PKG)
+
+# Mock ingest on the host: conformance-checks every batch and prints a summary.
+run-mock: build-mock
+	$(MOCK_BIN) --addr :8088 --api-key local-dev-key
+
+# Agent on the host in http mode, against `make run-mock` and the plain broker
+# from ./docker-compose.yml. Mirrors run / run-stdout.
+run-http: build
+	KAFKA_BROKERS=localhost:9092 \
+	EXPORT_MODE=http \
+	EXPORT_ENDPOINT=http://localhost:8088/v1/batches \
+	API_KEY=local-dev-key \
+	COLLECTION_INTERVAL=10s \
+	LOG_LEVEL=debug \
+	$(BIN)
+
+# One command: SASL/ACL Kafka + agent in http mode + mock ingest, then follow
+# the conformance output. The "show me batches flowing" entry point.
+test-http: test-http-up
+	cd test && $(COMPOSE_HTTP) logs -f mock-ingest
+
+test-http-up:
+	cd test && $(COMPOSE_HTTP) up -d --build
+
+test-http-logs:
+	cd test && $(COMPOSE_HTTP) logs -f mock-ingest
+
+test-http-down:
+	cd test && $(COMPOSE_HTTP) down -v
+
+test-http-restart:
+	cd test && $(COMPOSE_HTTP) restart agent
+
+# Gate: non-zero unless the first MOCK_REQUIRE batches all pass conformance.
+# docker wait, not --abort-on-container-exit: kafka-init exits 0 on purpose and
+# would abort the run before a single batch arrives.
+test-http-verify:
+	cd test && MOCK_REQUIRE=$${MOCK_REQUIRE:-5} $(COMPOSE_HTTP) up -d --build; \
+	rc=$$(docker wait streamsight-mock-ingest); \
+	$(COMPOSE_HTTP) logs mock-ingest; \
+	$(COMPOSE_HTTP) down -v >/dev/null 2>&1; \
+	exit $$rc

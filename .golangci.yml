@@ -1,0 +1,116 @@
+# Deliberately small. This is ~5k lines of stdlib-only Go with one maintainer,
+# so the config starts from golangci-lint's own `standard` set and adds only the
+# linters this codebase's specific failure modes justify. It is not a port of a
+# large project's config: a long exclusion list is scar tissue that has to be
+# earned, and this repo has not earned any yet.
+version: "2"
+
+linters:
+  # errcheck, govet, ineffassign, staticcheck, unused. govet's `shadow`
+  # analyser stays at its default (off): it fires on `if err := f(); err != nil`
+  # inside a function that already has an `err`, which is the single most
+  # idiomatic error-handling form in Go and is used deliberately throughout the
+  # collector and the exporters.
+  default: standard
+
+  enable:
+    # The HTTP exporter classifies errors as retryable or terminal via
+    # errors.As/%w. A comparison against a wrapped error that silently never
+    # matches means batches are discarded instead of retried -- that bug has
+    # already shipped here once.
+    - errorlint
+    # internal/export/http.go is the only HTTP client in the tree, and a
+    # response body that is not closed on the retry path leaks a connection
+    # per failed cycle, forever, in a process designed to run for months.
+    - bodyclose
+    # `if err != nil { return nil }` is the shape that turns a failed
+    # collection section into "this cluster has no consumer groups", which is
+    # precisely the confusion the sections[] contract exists to prevent.
+    - nilerr
+    # The agent handles the customer's SASL credentials and TLS config. Findings
+    # here get annotated with a #nosec and a reason, never disabled wholesale.
+    - gosec
+    - unconvert
+    - misspell
+    - perfsprint
+    - revive
+
+  settings:
+    errcheck:
+      # A bare `x.(T)` that panics mid-cycle takes the whole agent down, and the
+      # comma-ok form costs one line.
+      #
+      # check-blank stays off on purpose: `_ = f()` is this codebase's explicit
+      # marker for "the error here is genuinely uninteresting, and I decided
+      # that", e.g. draining a response body before closing it. Flagging the
+      # marker would push people toward dropping the call's result silently
+      # instead, which is the thing errcheck exists to prevent.
+      check-type-assertions: true
+
+    staticcheck:
+      # golangci's defaults, minus QF1001. The QF ("quickfix") family is
+      # written for an editor's refactor menu, not for a merge gate, and QF1001
+      # in particular wants De Morgan applied to `!(a < b && b < c && ...)`,
+      # where the negated whole is the readable form and the expansion into a
+      # chain of ORs is not.
+      checks:
+        - all
+        - -ST1000
+        - -ST1003
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        - -QF1001
+
+    revive:
+      # Below 0.8 revive starts arguing about naming in ways that are opinion,
+      # not defect.
+      confidence: 0.8
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        # Kept on, unlike most large repos, because every exported symbol here
+        # is either the wire contract (internal/metrics) or a package's whole
+        # API, and both are read by people deciding whether to trust the binary.
+        - name: exported
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: unreachable-code
+        - name: var-declaration
+        - name: superfluous-else
+
+  exclusions:
+    generated: lax
+    presets:
+      # Deliberately NOT the `comments` preset: it exists to silence "exported
+      # X should have a comment", which is the one revive rule this repo most
+      # wants enforced. See the `exported` rule above.
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Tests assert on behaviour, not on the error of every helper they call,
+      # and a t.Fatal on a Close() in a defer buys nothing.
+      - path: _test\.go$
+        linters:
+          - errcheck
+          - gosec
+          - revive
+
+formatters:
+  # gofmt overlaps the `gofmt -l` step in CI and `make fmt-check`, which stay
+  # because they need no download and fail in two seconds. goimports is the
+  # addition: it enforces the stdlib / module import grouping the tree already
+  # uses everywhere and that gofmt has no opinion about.
+  enable:
+    - gofmt
+    - goimports

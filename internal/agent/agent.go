@@ -1,6 +1,6 @@
-// Package agent owns the collection loop: it wires a Kafka client, a
-// collector and an exporter together, stamps the batch envelope the collector
-// cannot know about, and shuts all three down cleanly.
+// Package agent owns the collection loop: it wires a Kafka client, a collector
+// and an exporter together, stamps the batch envelope the collector cannot
+// know about, and shuts all three down cleanly.
 package agent
 
 import (
@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,12 +20,14 @@ import (
 	"kafka-metrics-agent/internal/metrics"
 )
 
-// batchCollector is the agent's view of the collector. It exists so the loop
-// can be tested without a broker.
+// batchCollector is the agent's view of the collector, so the loop can be
+// tested without a broker.
 type batchCollector interface {
 	Collect(ctx context.Context) *metrics.Batch
 }
 
+// Agent is the collection loop: one Kafka client, one collector and one
+// exporter, plus the envelope fields the collector deliberately leaves zero.
 type Agent struct {
 	cfg     *config.Config
 	logger  *slog.Logger
@@ -35,13 +38,13 @@ type Agent struct {
 	exporter  export.Exporter
 
 	startedAt time.Time
-	// batchSeq is monotonic from 1 per boot. It is only ever touched from the
+	// batchSeq is monotonic from 1 per boot, and only ever touched from the
 	// single collection goroutine.
 	batchSeq uint64
 }
 
 // New connects to Kafka and builds the pipeline. Every failure path after the
-// client is created must close it -- a returned error means the caller has no
+// client is created must close it -- a returned error leaves the caller no
 // handle to close it with.
 func New(cfg *config.Config, version string) (*Agent, error) {
 	logger := setupLogger(cfg.SlogLevel())
@@ -64,15 +67,41 @@ func New(cfg *config.Config, version string) (*Agent, error) {
 	}
 	logger.Info("connected to kafka", "brokers", cfg.KafkaBrokers)
 
-	coll, err := collector.New(client, collector.Options{
-		Timeout:               cfg.CollectionTimeout,
-		IncludeInternalTopics: cfg.IncludeInternalTopics,
-		TopicIncludeRegex:     cfg.TopicIncludeRegex,
-		TopicExcludeRegex:     cfg.TopicExcludeRegex,
-		GroupIncludeRegex:     cfg.GroupIncludeRegex,
-		GroupExcludeRegex:     cfg.GroupExcludeRegex,
-		Logger:                logger,
-	})
+	// A broker below Kafka 2.6 ignores the filter without erroring, which does
+	// not degrade the setting but inverts it: the operator asked for a few
+	// hundred groups and gets every one of them, on the cluster least able to
+	// serve that. Hence a startup failure rather than warn-and-continue. The
+	// probe runs once, here, on the ping's context.
+	if len(cfg.GroupStates) > 0 {
+		if err := client.CheckGroupStateFilter(pingCtx); err != nil {
+			client.Close()
+			return nil, fmt.Errorf("GROUP_STATES=%s cannot be honoured: %w", strings.Join(cfg.GroupStates, ","), err)
+		}
+		logger.Info("group state filter active", "states", cfg.GroupStates)
+	}
+
+	// Same probe, opposite policy: degrade instead of refusing to start. A
+	// cluster below Kafka 4.0 has no new-protocol groups to describe, but the
+	// phase must be switched off explicitly or it is a rejected request every
+	// cycle for the life of that cluster.
+	opts := collectorOptions(cfg, logger)
+	if opts.CollectConsumerGroups {
+		supported, err := client.SupportsConsumerGroupDescribe(pingCtx)
+		switch {
+		case err != nil:
+			// A failed probe says nothing about the cluster's capability, so
+			// leave the phase on: a spurious disable would hide new-protocol
+			// groups on a cluster that can serve them.
+			logger.Warn("could not probe ConsumerGroupDescribe support, leaving consumer group describe enabled", "error", err)
+		case !supported:
+			opts.CollectConsumerGroups = false
+			logger.Info("ConsumerGroupDescribe unsupported by at least one broker, disabling it (KIP-848 needs Kafka 4.0+); classic group describe is unaffected")
+		default:
+			logger.Debug("ConsumerGroupDescribe supported")
+		}
+	}
+
+	coll, err := collector.New(client, opts)
 	if err != nil {
 		client.Close()
 		return nil, fmt.Errorf("create collector: %w", err)
@@ -90,6 +119,7 @@ func New(cfg *config.Config, version string) (*Agent, error) {
 		Path:       cfg.ExportFile,
 		MaxMB:      cfg.ExportFileMaxMB,
 		MaxBackups: cfg.ExportFileMaxBackups,
+		Sync:       cfg.ExportFileSync,
 	})
 	if err != nil {
 		client.Close()
@@ -106,6 +136,39 @@ func New(cfg *config.Config, version string) (*Agent, error) {
 		exporter:  exporter,
 		startedAt: time.Now(),
 	}, nil
+}
+
+// collectorOptions translates the validated config into collector options. It
+// is a named function rather than a literal inside New so a test can prove
+// every setting actually reaches the collector: GroupStates was once plumbed
+// into ListGroups but missing from this mapping, which made GROUP_STATES
+// silently dead — a gap no collector test could have caught.
+func collectorOptions(cfg *config.Config, logger *slog.Logger) collector.Options {
+	return collector.Options{
+		Timeout:               cfg.CollectionTimeout,
+		IncludeInternalTopics: cfg.IncludeInternalTopics,
+		TopicIncludeRegex:     cfg.TopicIncludeRegex,
+		TopicExcludeRegex:     cfg.TopicExcludeRegex,
+		GroupIncludeRegex:     cfg.GroupIncludeRegex,
+		GroupExcludeRegex:     cfg.GroupExcludeRegex,
+		GroupStates:           cfg.GroupStates,
+
+		CollectLastStableOffset: cfg.CollectLastStableOffset,
+		CollectConsumerGroups:   cfg.CollectConsumerGroups,
+		CollectLogDirs:          cfg.CollectLogDirs,
+		LogDirsEvery:            cfg.LogDirsEvery,
+
+		Limits: collector.Limits{
+			MaxErrors:             cfg.MaxErrors,
+			MaxErrorSamples:       cfg.MaxErrorSamples,
+			MaxTopics:             cfg.MaxTopics,
+			MaxPartitionsPerTopic: cfg.MaxPartitionsPerTopic,
+			MaxGroups:             cfg.MaxGroups,
+			MaxMembersPerGroup:    cfg.MaxMembersPerGroup,
+			MaxOffsetsPerGroup:    cfg.MaxOffsetsPerGroup,
+		},
+		Logger: logger,
+	}
 }
 
 // Run collects on a fixed interval until SIGINT/SIGTERM. The first cycle runs
@@ -132,9 +195,9 @@ func (a *Agent) Run() error {
 }
 
 // runCycle is one collect-and-export. Collection is bounded by
-// COLLECTION_TIMEOUT so a hung broker cannot eat the tick interval; export
-// deliberately uses the parent context instead, because a cycle that used its
-// whole budget still has a batch worth shipping.
+// COLLECTION_TIMEOUT so a hung broker cannot eat the tick interval; export is
+// detached from the signal context, because a cycle that used its whole budget
+// still has a batch worth shipping even once shutdown has begun.
 func (a *Agent) runCycle(parent context.Context) {
 	collectCtx, cancel := context.WithTimeout(parent, a.cfg.CollectionTimeout)
 	batch := a.collector.Collect(collectCtx)
@@ -145,10 +208,30 @@ func (a *Agent) runCycle(parent context.Context) {
 		return
 	}
 
+	// A cycle cut short by SIGTERM produces a batch whose every section failed
+	// with a transport error — a description of the agent stopping, not of the
+	// cluster breaking. Discard it and consume no sequence number: a hole in
+	// batch_seq means lost data at the backend, so shipping one on every
+	// rollout would make routine restarts look like an outage.
+	if parent.Err() != nil {
+		a.logger.Debug("cycle interrupted by shutdown, batch discarded")
+		return
+	}
+
 	a.batchSeq++
 	a.stamp(batch)
 
-	if err := a.exporter.Export(parent, batch); err != nil {
+	// Bounded so a wedged ingest cannot hold shutdown past the container's
+	// termination grace period. Config.Load guarantees a positive timeout; the
+	// guard keeps a hand-constructed zero from meaning "already expired".
+	exportCtx := context.WithoutCancel(parent)
+	if a.cfg.ExportTimeout > 0 {
+		var exportCancel context.CancelFunc
+		exportCtx, exportCancel = context.WithTimeout(exportCtx, a.cfg.ExportTimeout)
+		defer exportCancel()
+	}
+
+	if err := a.exporter.Export(exportCtx, batch); err != nil {
 		a.logger.Error("export failed", "error", err, "batch_seq", batch.BatchSeq)
 		return
 	}
@@ -182,7 +265,7 @@ func (a *Agent) stamp(batch *metrics.Batch) {
 	}
 }
 
-// Close flushes the exporter before dropping the Kafka connection. Both are
+// Close flushes the exporter before dropping the Kafka connection. It is
 // nil-safe so a partially built agent can still be closed.
 func (a *Agent) Close() error {
 	var err error
