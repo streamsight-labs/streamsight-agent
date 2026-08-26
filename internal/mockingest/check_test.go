@@ -34,6 +34,14 @@ func i64(v int64) *int64 { return &v }
 func validBatch(seq uint64) *metrics.Batch {
 	ms := func(n int) time.Time { return base.Add(time.Duration(n) * time.Millisecond) }
 
+	// broker_rpc is on by default and costs no request, so a realistic batch
+	// carries one window of it. Built through Observe rather than by hand: the
+	// bucket layout is fixed so that counts add across agents, and a fixture that
+	// invented its own would not be the wire format.
+	rpc := metrics.BrokerAPIRPC{API: "metadata", BytesWritten: 120, BytesRead: 4096}
+	rpc.E2E.Observe(3 * time.Millisecond)
+	rpc.WriteWait.Observe(80 * time.Microsecond)
+
 	return &metrics.Batch{
 		SchemaVersion:   metrics.SchemaVersion,
 		AgentVersion:    "v0.1.0-test",
@@ -80,19 +88,31 @@ func validBatch(seq uint64) *metrics.Batch {
 			UptimeSec:        int64(seq) * 10,
 			BatchesCollected: seq,
 			BatchesExported:  seq - 1,
+			RPC: &metrics.RPCStats{
+				WindowMs: 30_000,
+				Brokers:  []metrics.BrokerRPC{{BrokerID: 1, Requests: []metrics.BrokerAPIRPC{rpc}, ConnectAttempts: 1}},
+			},
 		},
-		// The collector's real seven-section output under DEFAULT config,
-		// including the log_dirs section that is "skipped" whenever
-		// COLLECT_LOG_DIRS is off. topics_end is stamped after offsets finished,
-		// which is the phase-order constraint.
+		// The collector's real section output under DEFAULT config: every phase
+		// emits its section on every cycle, and the ones that did not run —
+		// log_dirs and the window because they are off, the two triggered phases
+		// because nothing triggered them, group_states because the fast poll is
+		// off — say "skipped" rather than going absent. topics_end is stamped
+		// after offsets finished, which is the phase-order constraint.
 		Sections: []metrics.Section{
 			{Name: "cluster", Status: metrics.SectionOK, SampledAt: ms(0), DurationMs: 1},
 			{Name: "topics", Status: metrics.SectionOK, SampledAt: ms(1), DurationMs: 2},
+			{Name: "topics_window", Status: metrics.SectionSkipped, SampledAt: ms(1), DurationMs: 0},
 			{Name: "topics_lso", Status: metrics.SectionOK, SampledAt: ms(8), DurationMs: 1},
 			{Name: "topics_end", Status: metrics.SectionOK, SampledAt: ms(10), DurationMs: 3},
 			{Name: "groups", Status: metrics.SectionOK, SampledAt: ms(2), DurationMs: 4},
 			{Name: "offsets", Status: metrics.SectionOK, SampledAt: ms(3), DurationMs: 5},
+			{Name: "group_states", Status: metrics.SectionSkipped, SampledAt: ms(11), DurationMs: 0},
+			{Name: "epoch_probes", Status: metrics.SectionSkipped, SampledAt: ms(11), DurationMs: 0},
 			{Name: "log_dirs", Status: metrics.SectionSkipped, SampledAt: ms(11), DurationMs: 0},
+			{Name: "reassignments", Status: metrics.SectionSkipped, SampledAt: ms(11), DurationMs: 0},
+			{Name: "authorized_operations", Status: metrics.SectionOK, SampledAt: ms(12), DurationMs: 1},
+			{Name: "broker_rpc", Status: metrics.SectionOK, SampledAt: ms(13), DurationMs: 0},
 		},
 	}
 }

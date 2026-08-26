@@ -6,21 +6,77 @@ agent.batches_rejected uint64
 agent.export_retries uint64
 agent.last_export_error string omitempty
 agent.queue_depth int
+agent.rpc *metrics.RPCStats nullable omitempty
+agent.rpc.brokers []metrics.BrokerRPC
+agent.rpc.brokers[].broker_id int32
+agent.rpc.brokers[].connect_attempts uint64
+agent.rpc.brokers[].connect_failures uint64
+agent.rpc.brokers[].connect_latency metrics.LatencyHistogram
+agent.rpc.brokers[].connect_latency.bounds_us []int64
+agent.rpc.brokers[].connect_latency.count int64
+agent.rpc.brokers[].connect_latency.counts []int64
+agent.rpc.brokers[].connect_latency.max_us *int64 nullable
+agent.rpc.brokers[].connect_latency.sum_us int64
+agent.rpc.brokers[].disconnects uint64
+agent.rpc.brokers[].last_connect_error string omitempty
+agent.rpc.brokers[].requests []metrics.BrokerAPIRPC
+agent.rpc.brokers[].requests[].api string
+agent.rpc.brokers[].requests[].bytes_read int64
+agent.rpc.brokers[].requests[].bytes_written int64
+agent.rpc.brokers[].requests[].e2e metrics.LatencyHistogram
+agent.rpc.brokers[].requests[].e2e.bounds_us []int64
+agent.rpc.brokers[].requests[].e2e.count int64
+agent.rpc.brokers[].requests[].e2e.counts []int64
+agent.rpc.brokers[].requests[].e2e.max_us *int64 nullable
+agent.rpc.brokers[].requests[].e2e.sum_us int64
+agent.rpc.brokers[].requests[].errors uint64
+agent.rpc.brokers[].requests[].write_wait metrics.LatencyHistogram
+agent.rpc.brokers[].requests[].write_wait.bounds_us []int64
+agent.rpc.brokers[].requests[].write_wait.count int64
+agent.rpc.brokers[].requests[].write_wait.counts []int64
+agent.rpc.brokers[].requests[].write_wait.max_us *int64 nullable
+agent.rpc.brokers[].requests[].write_wait.sum_us int64
+agent.rpc.brokers[].throttle_events uint64
+agent.rpc.brokers[].throttled_ms int64
+agent.rpc.window_ms int64
 agent.uptime_sec int64
 agent_instance_id string
 agent_version string
 batch_seq uint64
 cluster metrics.ClusterMetrics
+cluster.authorized_operations *metrics.AuthorizedOps nullable omitempty
+cluster.authorized_operations.bitfield *int32 nullable
+cluster.authorized_operations.operations []string
 cluster.broker_count int
 cluster.brokers []metrics.Broker
 cluster.brokers[].host string
 cluster.brokers[].id int32
 cluster.brokers[].port int32
 cluster.brokers[].rack *string nullable omitempty
+cluster.capabilities *metrics.ClusterCapabilities nullable omitempty
+cluster.capabilities.brokers []metrics.BrokerCapability
+cluster.capabilities.brokers[].api_max_versions map[string]int16
+cluster.capabilities.brokers[].broker_id int32
+cluster.capabilities.brokers[].software_version string omitempty
+cluster.capabilities.features map[string]bool
+cluster.capabilities.mixed_versions bool
+cluster.capabilities.software_versions []string
 cluster.controller int32
 cluster.id string
 collected_at time.Time
 collection_ms int64
+epoch_probes []metrics.EpochProbe omitempty
+epoch_probes[].committed_epoch int32
+epoch_probes[].committed_offset *int64 nullable
+epoch_probes[].current_leader_epoch int32
+epoch_probes[].end_offset *int64 nullable
+epoch_probes[].error_code int16 omitempty
+epoch_probes[].group_id string
+epoch_probes[].node_id *int32 nullable
+epoch_probes[].partition int32
+epoch_probes[].returned_epoch *int32 nullable
+epoch_probes[].topic string
+epoch_probes[].topic_id string omitempty
 errors []metrics.CollectionError omitempty
 errors[].api string omitempty
 errors[].broker_id *int32 nullable omitempty
@@ -33,9 +89,34 @@ errors[].message string
 errors[].partition *int32 nullable omitempty
 errors[].section string
 errors[].topic string omitempty
+group_states *metrics.GroupStateWatch nullable omitempty
+group_states.groups []metrics.GroupStateWindow
+group_states.groups[].coordinator int32
+group_states.groups[].group_id string
+group_states.groups[].state_at_end string
+group_states.groups[].state_at_start string
+group_states.groups[].states []metrics.GroupStateDwell
+group_states.groups[].states[].completed int
+group_states.groups[].states[].completed_ms []int64
+group_states.groups[].states[].entries int
+group_states.groups[].states[].observed_ms int64
+group_states.groups[].states[].state string
+group_states.groups[].transition_count int
+group_states.groups[].transitions []metrics.GroupStateTransition
+group_states.groups[].transitions[].at time.Time
+group_states.groups[].transitions[].from string
+group_states.groups[].transitions[].to string
+group_states.missed_polls int
+group_states.poll_interval_ms int64
+group_states.polls int
+group_states.window_end time.Time
+group_states.window_start time.Time
 groups []metrics.GroupMetrics
 groups[].assignment_epoch *int32 nullable omitempty
 groups[].assignor string omitempty
+groups[].authorized_operations *metrics.AuthorizedOps nullable omitempty
+groups[].authorized_operations.bitfield *int32 nullable
+groups[].authorized_operations.operations []string
 groups[].coordinator int32
 groups[].error_code int16 omitempty
 groups[].generation int32
@@ -71,6 +152,7 @@ limits.max_members_per_group int omitempty
 limits.max_offsets_per_group int omitempty
 limits.max_partitions_per_topic int omitempty
 limits.max_topics int omitempty
+limits.max_transitions_per_group int omitempty
 log_dirs []metrics.LogDir omitempty
 log_dirs[].broker int32
 log_dirs[].dir string
@@ -94,6 +176,13 @@ offsets[].offsets[].metadata string omitempty
 offsets[].offsets[].offset *int64 nullable
 offsets[].offsets[].partition int32
 offsets[].offsets[].topic string
+principal string omitempty
+reassignments []metrics.Reassignment omitempty
+reassignments[].adding_replicas []int32
+reassignments[].partition int32
+reassignments[].removing_replicas []int32
+reassignments[].replicas []int32
+reassignments[].topic string
 schema_version int
 sections []metrics.Section
 sections[].duration_ms int64
@@ -104,7 +193,13 @@ sections[].name string
 sections[].sampled_at time.Time
 sections[].status metrics.SectionStatus
 sections[].truncated bool omitempty
+throughput_window *metrics.ThroughputWindow nullable omitempty
+throughput_window.requested_ms int64
+throughput_window.width_ms int64
 topics []metrics.TopicMetrics
+topics[].authorized_operations *metrics.AuthorizedOps nullable omitempty
+topics[].authorized_operations.bitfield *int32 nullable
+topics[].authorized_operations.operations []string
 topics[].error_code int16 omitempty
 topics[].id string omitempty
 topics[].internal bool
@@ -121,10 +216,16 @@ topics[].partitions[].leader_epoch int32
 topics[].partitions[].offline_replicas []int32 omitempty
 topics[].partitions[].replicas []int32
 topics[].partitions[].start_offset *int64 nullable
+topics[].partitions[].window *metrics.WindowOffset nullable omitempty
+topics[].partitions[].window.error_code int16 omitempty
+topics[].partitions[].window.leader_epoch int32
+topics[].partitions[].window.offset *int64 nullable
+topics[].partitions[].window.timestamp_ms *int64 nullable
 topics[].replication_factor int
 truncation *metrics.Truncation nullable omitempty
 truncation.errors_collapsed int omitempty
 truncation.errors_dropped int omitempty
+truncation.group_state_transitions int omitempty
 truncation.groups int omitempty
 truncation.members int omitempty
 truncation.offsets int omitempty

@@ -34,6 +34,22 @@ var allKeys = []string{
 	"GROUP_INCLUDE_REGEX",
 	"GROUP_EXCLUDE_REGEX",
 	"GROUP_STATES",
+	"EXPORT_FILE_FSYNC",
+	"COLLECT_LAST_STABLE_OFFSET",
+	"COLLECT_CONSUMER_GROUPS",
+	"COLLECT_LOG_DIRS",
+	"LOG_DIRS_EVERY",
+	"COLLECT_THROUGHPUT_WINDOW",
+	"THROUGHPUT_WINDOW",
+	"THROUGHPUT_WINDOW_EVERY",
+	"COLLECT_AUTHORIZED_OPS",
+	"AUTHORIZED_OPS_EVERY",
+	"COLLECT_REASSIGNMENTS",
+	"COLLECT_EPOCH_PROBES",
+	"COLLECT_RPC_STATS",
+	"COLLECT_GROUP_STATES",
+	"GROUP_STATE_POLL_INTERVAL",
+	"MAX_TRANSITIONS_PER_GROUP",
 	"MAX_ERRORS",
 	"MAX_ERROR_SAMPLES",
 	"MAX_TOPICS",
@@ -476,6 +492,19 @@ func TestLoadDefaults(t *testing.T) {
 		{"CollectLastStableOffset", cfg.CollectLastStableOffset, DefaultCollectLSO},
 		{"CollectLogDirs", cfg.CollectLogDirs, DefaultCollectLogDirs},
 		{"LogDirsEvery", cfg.LogDirsEvery, DefaultLogDirsEvery},
+		{"CollectThroughputWindow", cfg.CollectThroughputWindow, DefaultCollectThroughputWindow},
+		{"ThroughputWindow", cfg.ThroughputWindow, DefaultThroughputWindow},
+		{"ThroughputWindowEvery", cfg.ThroughputWindowEvery, DefaultThroughputWindowEvery},
+		{"CollectAuthorizedOps", cfg.CollectAuthorizedOps, DefaultCollectAuthorizedOps},
+		{"AuthorizedOpsEvery", cfg.AuthorizedOpsEvery, DefaultAuthorizedOpsEvery},
+		{"CollectReassignments", cfg.CollectReassignments, DefaultCollectReassignments},
+		{"CollectEpochProbes", cfg.CollectEpochProbes, DefaultCollectEpochProbes},
+		{"CollectRPCStats", cfg.CollectRPCStats, DefaultCollectRPCStats},
+		{"CollectGroupStates", cfg.CollectGroupStates, DefaultCollectGroupStates},
+		{"GroupStatePollInterval", cfg.GroupStatePollInterval, DefaultGroupStatePollInterval},
+		// The one cap whose default is not "unlimited"; see
+		// DefaultMaxTransitionsPerGroup.
+		{"MaxTransitionsPerGroup", cfg.MaxTransitionsPerGroup, DefaultMaxTransitionsPerGroup},
 		{"MaxErrors", cfg.MaxErrors, DefaultMaxErrors},
 		{"MaxErrorSamples", cfg.MaxErrorSamples, DefaultMaxErrorSamples},
 		// 0 = unlimited; see DefaultMaxEntities.
@@ -721,6 +750,54 @@ func TestLoadOptionalCollectors(t *testing.T) {
 		_, err := Load()
 		requireErrContains(t, err, "COLLECT_LOG_DIRS")
 	})
+
+	t.Run("the tier-1 phases are configurable end to end", func(t *testing.T) {
+		setEnv(t, base(map[string]string{
+			"COLLECT_THROUGHPUT_WINDOW": "true",
+			"THROUGHPUT_WINDOW":         "10m",
+			"THROUGHPUT_WINDOW_EVERY":   "4",
+			"COLLECT_AUTHORIZED_OPS":    "false",
+			"AUTHORIZED_OPS_EVERY":      "30",
+			"COLLECT_REASSIGNMENTS":     "false",
+			"COLLECT_EPOCH_PROBES":      "false",
+			"COLLECT_RPC_STATS":         "false",
+			"COLLECT_GROUP_STATES":      "true",
+			"GROUP_STATE_POLL_INTERVAL": "2s",
+			"MAX_TRANSITIONS_PER_GROUP": "64",
+		}))
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.CollectThroughputWindow || cfg.ThroughputWindow != 10*time.Minute || cfg.ThroughputWindowEvery != 4 {
+			t.Errorf("throughput window = %t/%s/%d", cfg.CollectThroughputWindow, cfg.ThroughputWindow, cfg.ThroughputWindowEvery)
+		}
+		if cfg.CollectAuthorizedOps || cfg.AuthorizedOpsEvery != 30 {
+			t.Errorf("authorized ops = %t/%d", cfg.CollectAuthorizedOps, cfg.AuthorizedOpsEvery)
+		}
+		if cfg.CollectReassignments || cfg.CollectEpochProbes || cfg.CollectRPCStats {
+			t.Errorf("triggered phases = %t/%t/%t", cfg.CollectReassignments, cfg.CollectEpochProbes, cfg.CollectRPCStats)
+		}
+		if !cfg.CollectGroupStates || cfg.GroupStatePollInterval != 2*time.Second || cfg.MaxTransitionsPerGroup != 64 {
+			t.Errorf("group states = %t/%s/%d", cfg.CollectGroupStates, cfg.GroupStatePollInterval, cfg.MaxTransitionsPerGroup)
+		}
+	})
+
+	// Every one of these is a modulus, a ticker period or a window width, so the
+	// value Load would otherwise pass on either panics or asks about the future.
+	t.Run("nonsensical cadences and widths are rejected", func(t *testing.T) {
+		for key, value := range map[string]string{
+			"THROUGHPUT_WINDOW":         "0s",
+			"THROUGHPUT_WINDOW_EVERY":   "0",
+			"AUTHORIZED_OPS_EVERY":      "0",
+			"GROUP_STATE_POLL_INTERVAL": "-1s",
+			"MAX_TRANSITIONS_PER_GROUP": "-1",
+		} {
+			setEnv(t, base(map[string]string{key: value}))
+			_, err := Load()
+			requireErrContains(t, err, key)
+		}
+	})
 }
 
 func TestCollectorWarnings(t *testing.T) {
@@ -756,6 +833,60 @@ func TestCollectorWarnings(t *testing.T) {
 			t.Errorf("enabling log dirs at the default cadence warns: %v", cfg.Warnings())
 		}
 	})
+
+	// A window narrower than the interval is legal and useless: the backend can
+	// difference two consecutive batches over that span for free.
+	t.Run("a throughput window narrower than the interval warns", func(t *testing.T) {
+		setEnv(t, base(map[string]string{"COLLECT_THROUGHPUT_WINDOW": "true", "THROUGHPUT_WINDOW": "10s"}))
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !strings.Contains(strings.Join(cfg.Warnings(), "\n"), "THROUGHPUT_WINDOW") {
+			t.Errorf("warnings = %v", cfg.Warnings())
+		}
+	})
+
+	// The one phase whose cost is not paid per cycle, so the warning states the
+	// request count in brokers rather than in batches.
+	t.Run("the fast group-state poll warns about its per-broker cost", func(t *testing.T) {
+		setEnv(t, base(map[string]string{"COLLECT_GROUP_STATES": "true"}))
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		w := strings.Join(cfg.Warnings(), "\n")
+		if !strings.Contains(w, "PER BROKER") {
+			t.Errorf("warnings = %v", cfg.Warnings())
+		}
+		if strings.Contains(w, "MAX_TRANSITIONS_PER_GROUP=0") {
+			t.Errorf("the default cap is not unlimited, so it must not warn: %v", cfg.Warnings())
+		}
+	})
+
+	t.Run("a poll no faster than the collection interval warns", func(t *testing.T) {
+		setEnv(t, base(map[string]string{"COLLECT_GROUP_STATES": "true", "GROUP_STATE_POLL_INTERVAL": "45s"}))
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !strings.Contains(strings.Join(cfg.Warnings(), "\n"), "GROUP_STATE_POLL_INTERVAL") {
+			t.Errorf("warnings = %v", cfg.Warnings())
+		}
+	})
+
+	// The watch is off by default, so neither of the two settings above is in
+	// force and neither may produce noise at startup.
+	t.Run("group-state settings are silent while the watch is off", func(t *testing.T) {
+		setEnv(t, base(map[string]string{"GROUP_STATE_POLL_INTERVAL": "60s", "MAX_TRANSITIONS_PER_GROUP": "0"}))
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if len(cfg.Warnings()) != 0 {
+			t.Errorf("warnings = %v", cfg.Warnings())
+		}
+	})
 }
 
 func TestRedactedShowsTheCadenceOnlyWhenItApplies(t *testing.T) {
@@ -770,6 +901,23 @@ func TestRedactedShowsTheCadenceOnlyWhenItApplies(t *testing.T) {
 	}
 	if strings.Contains(s, "log_dirs_every=") {
 		t.Errorf("redacted output prints a cadence for a disabled phase: %s", s)
+	}
+	for _, want := range []string{
+		"collect_throughput_window=false", "collect_authorized_ops=true",
+		"collect_reassignments=true", "collect_epoch_probes=true",
+		"collect_rpc_stats=true", "collect_group_states=false",
+		// On by default, so its cadence IS in force and must be printed.
+		"authorized_ops_every=10",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("redacted output missing %q: %s", want, s)
+		}
+	}
+	// Leading spaces: "collect_throughput_window=" contains the width's own key.
+	for _, unwanted := range []string{" throughput_window=", " group_state_poll_interval="} {
+		if strings.Contains(s, unwanted) {
+			t.Errorf("redacted output prints %q for a disabled phase: %s", unwanted, s)
+		}
 	}
 
 	setEnv(t, base(map[string]string{"COLLECT_LOG_DIRS": "true"}))

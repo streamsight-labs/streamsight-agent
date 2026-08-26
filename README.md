@@ -14,7 +14,7 @@ flowchart TB
     ENV["env vars<br/>KAFKA_BROKERS, EXPORT_*, COLLECT_*, MAX_*"]
     CFG["config.Load<br/>validates the whole env surface at startup,<br/>reports every problem at once"]
     AGT["agent.Run<br/>ticker, per-cycle deadline, batch envelope"]
-    COL["collector.Collect<br/>seven phases, one cycle per tick"]
+    COL["collector.Collect<br/>thirteen phases, one cycle per tick"]
     KCL["kafka.Client<br/>kgo + kadm, SASL / TLS"]
     KFK[("Kafka cluster<br/>READ-ONLY — no produce, no consume, no mutation<br/>whole grant: DESCRIBE on CLUSTER, TOPIC, GROUP")]
     BAT["metrics.Batch — schema_version 1<br/>one JSON object per cycle"]
@@ -41,16 +41,18 @@ flowchart TB
 
 ### Collection order is a correctness constraint
 
-One cycle runs seven phases. Four of them sample the offset chain, and the order in which
+One cycle runs thirteen phases. Five of them sample the offset chain, and the order in which
 they are sampled decides the *sign* of the error you get from the unavoidable skew between
-the calls.
+the calls — that is the part of the picture worth reading closely. The other eight either
+wait for that chain to finish, fire only on a trigger, or issue no request at all, and are
+drawn grouped:
 
 ```mermaid
 flowchart TB
     MD["cluster<br/>Metadata"]
     LG["ListGroups<br/>issued once, shared by both group phases"]
     GR["groups<br/>DescribeGroups (+ ConsumerGroupDescribe)"]
-    LD["log_dirs<br/>DescribeLogDirs<br/>opt-in, every LOG_DIRS_EVERY cycles"]
+    WN["topics_window<br/>ListOffsetsAfterMilli → window.offset<br/>opt-in"]
 
     subgraph chain["offset sample chain — start ≤ committed ≤ LSO ≤ high watermark"]
         direction TB
@@ -58,25 +60,42 @@ flowchart TB
         OF["offsets<br/>OffsetFetch → committed offset"]
         LSO["topics_lso<br/>ListCommittedOffsets → last_stable_offset"]
         EN["topics_end<br/>ListEndOffsets → end_offset (high watermark)"]
-        TS -. "issued first" .-> OF
+        TS -. "issued first, no wait" .-> OF
         OF == "waits: committed before either ceiling" ==> LSO
         LSO ==> EN
     end
 
-    MD --> TS
-    MD --> OF
+    POST["after the end-offset sample<br/>log_dirs — every LOG_DIRS_EVERY cycles, opt-in<br/>reassignments — only on an observed URP<br/>epoch_probes — only on an unanswered epoch mismatch"]
+    JOIN["after every phase above has joined<br/>authorized_operations — one Metadata every AUTHORIZED_OPS_EVERY cycles<br/>group_states · broker_rpc — drain accumulators, no request"]
+
+    MD --> chain
+    MD --> WN
     LG --> GR
     LG --> OF
-    EN -- "waits for the end-offset sample" --> LD
+    WN == "waits: window before the ceilings" ==> LSO
+    EN --> POST
+    POST --> JOIN
+    GR -- "its bitfields are stamped here" --> JOIN
 
     classDef phase fill:#eef2f7,stroke:#4a6fa5,color:#12212f
     classDef shared fill:#f4f1ea,stroke:#8a7a4e,color:#2a2413
     classDef link fill:#e9f0ec,stroke:#3f7d5e,color:#0f2419
-    class MD,GR,LD phase
+    class MD,GR,POST,JOIN phase
     class LG shared
-    class TS,OF,LSO,EN link
+    class WN,TS,OF,LSO,EN link
     style chain fill:#fbfcfd,stroke:#3f7d5e,color:#0f2419
 ```
+
+Two of the three phases that wait for the end-offset sample are **triggered, not cadenced**:
+they read this batch's own `topics[]` and `offsets[]` and issue nothing at all unless the
+cluster gives them a reason — `reassignments` needs an under-replicated partition,
+`epoch_probes` a committed leader epoch that disagrees with the partition's current one
+*and* has not already been asked about. In a healthy cluster both report `skipped` forever.
+
+`group_states` and `broker_rpc` never issue a request in the cycle at all: both drain an
+accumulator filled elsewhere — a second, faster ticker and the client's own RPC hooks
+respectively — which is why they run last, after `wg.Wait()`, so the RPC window covers this
+cycle's own traffic.
 
 Sampling in that order makes every quantity derived from a pair of samples err slightly
 high rather than going negative — a caught-up consumer must never report `-3`, and a hung
@@ -89,12 +108,17 @@ transaction must never report a negative backlog and read as healthy:
 | `read_committed` lag | `last_stable_offset − committed` | committed before LSO |
 | open-transaction backlog | `end_offset − last_stable_offset` | LSO before end |
 
-Only this order keeps all four non-negative at once. `log_dirs` is the one phase whose
-position does not affect correctness; it still waits, so an O(replicas) response never
-shares the wire with the rate-bearing high-watermark call.
+Only this order keeps all four non-negative at once. `topics_window`
+(`COLLECT_THROUGHPUT_WINDOW`) joins the same chain: its offset is the lower edge of a
+record count whose upper edge is the high watermark, so it is issued *before* the end
+offsets or that count comes out negative. `log_dirs`, `reassignments` and `epoch_probes`
+are the phases whose position does not affect correctness; all three still wait, so an
+O(replicas) response or a triggered fan-out never shares the wire with the rate-bearing
+high-watermark call.
 
 The *wire* order of `sections[]` is different and also fixed: `cluster`, `topics`,
-`topics_lso`, `topics_end`, `groups`, `offsets`, `log_dirs`. See
+`topics_window`, `topics_lso`, `topics_end`, `groups`, `offsets`, `group_states`,
+`epoch_probes`, `log_dirs`, `reassignments`, `authorized_operations`, `broker_rpc`. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the package map, the per-cycle sequence
 and the request budget.
 
@@ -231,6 +255,17 @@ configuration problems at once and exits non-zero — one restart per fix, not f
 | `COLLECT_CONSUMER_GROUPS` | `true` | Adds the KIP-848 fields — `groups[].group_epoch`, `assignment_epoch`, `assignor`, per-member `member_epoch` / `target_assignment` — via `ConsumerGroupDescribe`. It is the only way to see a new-protocol group at all: the classic describe returns one with empty join metadata and **no error**. Needs Kafka 4.0+; startup probes `ApiVersions` and disables it with a log line on an older cluster, so the cost there is one round trip, not a rejected request per cycle. No new ACL. |
 | `COLLECT_LOG_DIRS` | `false` | Adds the `log_dirs[]` section (per-broker, per-directory replica bytes and offline-disk detection) via `DescribeLogDirs`. No ACL beyond the `DESCRIBE` on `CLUSTER` already required, but the response is O(replicas) = partitions × replication factor, the largest payload the agent emits. Size `MAX_TOPICS`/`MAX_PARTITIONS_PER_TOPIC` before enabling it on a large cluster. |
 | `LOG_DIRS_EVERY` | `10` | Run the log-dirs phase every Nth cycle — five minutes at the default interval, because disks fill over hours. Must be >= 1 (`1` = every cycle); `0` is an error, not "every cycle". Ignored when `COLLECT_LOG_DIRS=false`. |
+| `COLLECT_THROUGHPUT_WINDOW` | `false` | Adds `throughput_window` and `partitions[].window` via `ListOffsetsAfterMilli`: the produce rate measured **by the broker**, and the only rate input in the batch that survives an agent restart or a missed cycle. Off by default because it adds a `ListOffsets` fan-out — two on a mostly-silent cluster — to every cycle it runs on. Needs ListOffsets v1 (Kafka 0.10.1+); startup disables it below that, where the broker answers with no timestamp at all and no error. No new ACL. |
+| `THROUGHPUT_WINDOW` | `5m` | How far back the window reaches. It earns its cost only when it is **wider than `COLLECTION_INTERVAL`**: inside one interval a backend can already difference two batches. Must be > 0. |
+| `THROUGHPUT_WINDOW_EVERY` | `1` | Run the window phase every Nth cycle. Must be >= 1. |
+| `COLLECT_AUTHORIZED_OPS` | `true` | Adds `authorized_operations` on the cluster, each topic and each group (KIP-430), plus `principal` on the batch — the input to "grant `DESCRIBE_CONFIGS` on topic X to principal Y". One extra `Metadata` per sampled cycle; group bitfields ride the `DescribeGroups` the agent already issues. Needs Kafka 2.3+ (Metadata v8); startup disables it below that rather than shipping empty grants that read as broken ACLs. No new ACL. |
+| `AUTHORIZED_OPS_EVERY` | `10` | Run the ACL self-diagnostic every Nth cycle. Grants change on human timescales, and the request is O(partitions of the selected topics). Must be >= 1. |
+| `COLLECT_REASSIGNMENTS` | `true` | Adds `reassignments[]` via `ListPartitionReassignments` — "is this URP a failure or a planned move", the largest false-positive source in URP alerting. **The request is issued only when an under-replicated partition is observed**, so in a healthy cluster it costs one pass over a slice and the section reports `skipped`. Needs Kafka 2.4+. No new ACL. |
+| `COLLECT_EPOCH_PROBES` | `true` | Adds `epoch_probes[]` via `OffsetForLeaderEpoch`: positive proof of truncation (`committed_offset > end_offset` at the committed epoch), as opposed to the "high watermark went backwards" heuristic. **Fires only when a group's committed leader epoch disagrees with the partition's current one**, so it issues nothing in steady state. Needs Kafka 0.11+. No new ACL. |
+| `COLLECT_RPC_STATS` | `true` | Adds `agent.rpc` — per-broker latency histograms, bytes, connect failures and quota throttling, measured by hooks on the requests the agent already sends. Zero extra requests, zero ACL. Counters are per-window deltas reset every cycle: divide by `window_ms`, never by `COLLECTION_INTERVAL`. |
+| `COLLECT_GROUP_STATES` | `false` | Adds `group_states` — a fast `ListGroups` poll that observes the rebalance transitions a 30s cycle cannot see, drained onto the next batch. **The one phase whose cost is not paid per cycle**: one request *per broker* per tick, independent of `COLLECTION_INTERVAL`. Needs Kafka 2.6+ (ListGroups v4), below which the response carries no state at all. No new ACL. |
+| `GROUP_STATE_POLL_INTERVAL` | `5s` | The fast tick, floored at 1s. It is the resolution of every dwell sample — a `PreparingRebalance` shorter than this is invisible — and the wire echoes it as `poll_interval_ms`. Must be > 0; a value at or above `COLLECTION_INTERVAL` warns, since it can then see nothing the cycle would have missed. |
+| `MAX_TRANSITIONS_PER_GROUP` | `256` | Caps the fast poll's per-group transition list and its dwell samples. The one cap whose default is not "unlimited": a rebalance storm is exactly when that list is longest. `transition_count` stays true when the list truncates. |
 
 Regexes are **unanchored**: `orders` also matches `prod.orders`. Write `^orders$` for
 an exact match. Group IDs beginning with `__` are always skipped.
@@ -290,13 +325,30 @@ Per cycle, from the Admin API only:
   ID, subscribed topics, assignment, owned partitions).
 * **Offsets** — committed offset per group / topic / partition.
 * **Log directories** (opt-in, `COLLECT_LOG_DIRS`) — per broker, per directory: each
-  replica's on-disk size, its per-replica offset lag, in-flight JBOD moves, and offline
-  disks reported by the broker that owns them.
-* **Agent** — its own uptime, batch counters, queue depth, last export error.
+  replica's on-disk size, its per-replica offset lag, in-flight JBOD moves, offline disks
+  reported by the broker that owns them, and the underlying volume's total and usable bytes
+  on Kafka 3.3+.
+* **Throughput window** (opt-in, `COLLECT_THROUGHPUT_WINDOW`) — the first offset at or
+  after a broker-chosen timestamp, per partition: a produce rate measured by the broker
+  rather than differenced across batches.
+* **Reassignments** (triggered) — which of the under-replicated partitions the controller
+  reports as moving on purpose.
+* **Epoch probes** (triggered) — proof that a truncation ate records a group had already
+  consumed, rather than the heuristic that a high watermark moved backwards.
+* **Group states** (opt-in, `COLLECT_GROUP_STATES`) — rebalance transitions and per-state
+  dwell samples from a poll faster than the collection interval.
+* **Authorized operations** — what this agent's own principal may do to the cluster, each
+  topic and each group, plus the principal's name.
+* **Capabilities** — what the cluster can be asked, per broker: the API versions behind
+  every gate above, so an absent signal is attributable to a broker version rather than to
+  collection breaking.
+* **Agent** — its own uptime, batch counters, queue depth, last export error, and its own
+  per-broker RPC latency, bytes, connect failures and quota throttling.
 * **Sections** — per-phase status, sample timestamp and duration.
 
-Not obtainable this way, and therefore absent: request latency, bytes in/out, broker CPU
-and disk. Those need JMX. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what
+Not obtainable this way, and therefore absent: broker CPU, broker-side request latency and
+per-topic byte rates. Those need JMX. (`agent.rpc` is latency and bytes as *this agent*
+saw them, which is a property of one client's connection to a broker, not of the broker.) See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what
 is planned next and what it would cost, and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the request budget per cycle.
 
@@ -367,16 +419,28 @@ One batch per cycle, from the local test environment with default settings — s
     "batches_dropped": 0, "batches_rejected": 0, "export_retries": 0, "queue_depth": 0
   },
   "sections": [
-    {"name": "cluster",    "status": "ok",      "sampled_at": "2026-08-16T12:22:40.090245298Z", "duration_ms": 4},
-    {"name": "topics",     "status": "ok",      "sampled_at": "2026-08-16T12:22:40.095159048Z", "duration_ms": 7},
-    {"name": "topics_lso", "status": "ok",      "sampled_at": "2026-08-16T12:22:40.098912004Z", "duration_ms": 2},
-    {"name": "topics_end", "status": "ok",      "sampled_at": "2026-08-16T12:22:40.101431771Z", "duration_ms": 2},
-    {"name": "groups",     "status": "ok",      "sampled_at": "2026-08-16T12:22:40.090288923Z", "duration_ms": 6},
-    {"name": "offsets",    "status": "ok",      "sampled_at": "2026-08-16T12:22:40.096296465Z", "duration_ms": 2},
-    {"name": "log_dirs",   "status": "skipped", "sampled_at": "2026-08-16T12:22:40.101502110Z", "duration_ms": 0}
+    {"name": "cluster",       "status": "ok",      "sampled_at": "2026-08-16T12:22:40.090245298Z", "duration_ms": 4},
+    {"name": "topics",        "status": "ok",      "sampled_at": "2026-08-16T12:22:40.095159048Z", "duration_ms": 7},
+    {"name": "topics_window", "status": "skipped", "sampled_at": "2026-08-16T12:22:40.095161002Z", "duration_ms": 0},
+    {"name": "topics_lso",    "status": "ok",      "sampled_at": "2026-08-16T12:22:40.098912004Z", "duration_ms": 2},
+    {"name": "topics_end",    "status": "ok",      "sampled_at": "2026-08-16T12:22:40.101431771Z", "duration_ms": 2},
+    {"name": "groups",        "status": "ok",      "sampled_at": "2026-08-16T12:22:40.090288923Z", "duration_ms": 6},
+    {"name": "offsets",       "status": "ok",      "sampled_at": "2026-08-16T12:22:40.096296465Z", "duration_ms": 2},
+    {"name": "group_states",  "status": "skipped", "sampled_at": "2026-08-16T12:22:40.101498001Z", "duration_ms": 0},
+    {"name": "epoch_probes",  "status": "skipped", "sampled_at": "2026-08-16T12:22:40.101499114Z", "duration_ms": 0},
+    {"name": "log_dirs",      "status": "skipped", "sampled_at": "2026-08-16T12:22:40.101502110Z", "duration_ms": 0},
+    {"name": "reassignments", "status": "skipped", "sampled_at": "2026-08-16T12:22:40.101503991Z", "duration_ms": 0},
+    {"name": "authorized_operations", "status": "ok", "sampled_at": "2026-08-16T12:22:40.101601233Z", "duration_ms": 3},
+    {"name": "broker_rpc",    "status": "ok",      "sampled_at": "2026-08-16T12:22:40.104910447Z", "duration_ms": 0}
   ]
 }
 ```
+
+Cut from that example, and worth knowing before you size an ingest: `agent.rpc` — the
+`broker_rpc` payload — is per broker per API key, each row carrying two 12-bucket latency
+histograms. On this one-broker cluster it is the largest single block in the batch, and it
+grows with `brokers × API keys`. It is the reason a batch that measured 2.0 KB uncompressed
+before the phase existed measures 8.9 KB with it on.
 
 `schema_version` is bumped on any backwards-incompatible change to this shape. The
 `sections[].status` enum is closed in v1, which is why truncation is a separate boolean
@@ -415,10 +479,12 @@ an end-offset delta by `topics_end.sampled_at`, an LSO delta by `topics_lso.samp
 never by `collected_at`.
 
 **4. `sections` distinguishes "nothing there" from "we could not look".**
-A section is a collection phase. **Seven ship on every cycle, always in this order**:
-`cluster`, `topics`, `topics_lso`, `topics_end`, `groups`, `offsets`, `log_dirs`. A phase
-that did not run reports `skipped` rather than vanishing, so a missing section is a
-protocol error, not a disabled feature. Status is one of:
+A section is a collection phase. **All thirteen ship on every cycle, always in this
+order**: `cluster`, `topics`, `topics_window`, `topics_lso`, `topics_end`, `groups`,
+`offsets`, `group_states`, `epoch_probes`, `log_dirs`, `reassignments`,
+`authorized_operations`, `broker_rpc`. A phase that did not run reports `skipped` rather
+than vanishing, so a missing section is a protocol error, not a disabled feature. Status is
+one of:
 
 | Status | Meaning |
 |--------|---------|
@@ -426,7 +492,7 @@ protocol error, not a disabled feature. Status is one of:
 | `partial` | Some entities failed. The list is truthful but incomplete; see `errors`. |
 | `failed` | The phase produced nothing usable. Absence carries no information. |
 | `unauthorized` | Same as failed, with an actionable cause: a missing ACL. |
-| `skipped` | The phase never ran — cluster metadata failed, or the phase is disabled (`topics_lso` with `COLLECT_LAST_STABLE_OFFSET=false`) or off-cadence (`log_dirs` on the cycles between samples). |
+| `skipped` | The phase never ran — cluster metadata failed, the phase is disabled (`topics_lso` with `COLLECT_LAST_STABLE_OFFSET=false`) or was disabled at startup because the cluster is too old (check `cluster.capabilities`), it is off-cadence (`log_dirs` on the cycles between samples), or its trigger did not fire (`reassignments` with no under-replicated partition; `epoch_probes` with no leader-epoch mismatch, or none that had not already been asked about — the steady state for both). |
 
 `topics`, `groups` and `offsets` are `null` rather than `[]` when a phase produced
 nothing; `log_dirs` is `omitempty`, so it is absent from the JSON entirely.
@@ -498,17 +564,24 @@ identification of a dead disk from the broker that owns it, rather than from a p
 
 ```json
 "log_dirs": [
-  {"broker": 1, "dir": "/var/lib/kafka/data", "total_bytes": null, "usable_bytes": null,
+  {"broker": 1, "dir": "/var/lib/kafka/data", "total_bytes": 507345362944, "usable_bytes": 412998352896,
    "partitions": [{"topic": "orders", "partition": 0, "size": 20480, "offset_lag": 0}]}
 ]
 ```
 
 * `total_bytes` and `usable_bytes` are the KIP-827 volume figures — the denominator for any
-  days-to-full forecast. They are **always `null` today**: the Kafka client library's
-  response decoder drops them, so reaching them needs a raw-protocol request. They are on
-  the wire now so that filling them in later is a collector change, not a schema change. Do
-  **not** substitute `sum(partitions[].size)`: with a topic filter in force that is a lower
-  bound on the directory's usage, not the usage.
+  days-to-full forecast. They are filled when **every** broker serves `DescribeLogDirs` v4
+  (Kafka 3.3+), which the agent asks for with a raw-protocol request because the client
+  library's decoder drops both fields. Below that the agent falls back to the library's own
+  path and both stay `null`; `cluster.capabilities.features.log_dirs_volume_bytes` says which
+  of the two you are getting. `null` also covers the broker's `-1` — "I could not stat the
+  volume" — which is never shipped as a negative size, because a disk reported as 0 bytes
+  total is a disk that is always 100% full.
+* **They describe the volume, not the directory.** Two log dirs on one mount report identical
+  figures, so summing them across dirs double-counts the disk: group by
+  `(broker, total_bytes, usable_bytes)` before adding, or forecast per directory. And do
+  **not** substitute `sum(partitions[].size)` for usage: with a topic filter in force that is
+  a lower bound on the directory's usage, not the usage.
 * `error_code` on a directory is directory-level. `56` (`KAFKA_STORAGE_ERROR`) means the
   log directory is **offline**; `partitions` is `null` in that case, which is not the same
   as an empty directory.
@@ -538,12 +611,22 @@ exporter, so `batches_exported` is always at least one behind `batches_collected
   `cooperative-sticky` assignors. A detector keyed on generation deltas would sit at zero
   forever and read as a perfectly stable cluster. Use `group_epoch` (new-protocol groups),
   member-ID churn, or `PreparingRebalance` dwell instead.
-* `log_dirs[].total_bytes` / `usable_bytes` are always `null` (see above), so disk headroom
-  cannot yet be computed from a batch — only growth.
+* `log_dirs[].total_bytes` / `usable_bytes` are `null` below `DescribeLogDirs` v4
+  (Kafka 3.3+), so on an older cluster a batch still carries growth with no headroom to
+  compare it against.
 * A group filtered out by `GROUP_STATES` is indistinguishable from a deleted one: the
   broker never lists it, so there is nothing for the agent to mark as truncated.
-* `last_stable_offset` is silently the high watermark on a pre-Kafka-0.11 broker (see
-  point 2 above).
+* `last_stable_offset` on a pre-Kafka-0.11 broker: the phase is now **disabled at startup**
+  by the capability probe, so the field is `null` and `topics_lso` is `skipped` rather than
+  silently carrying the high watermark. The failure mode only returns if the probe itself
+  failed, which is logged loudly.
+* `broker_rpc` histograms are per broker per API key with no cap of their own, and their
+  contribution to batch size has never been measured beyond a single-broker cluster. On a
+  large fleet, check batch bytes before leaving `COLLECT_RPC_STATS` on.
+* `group_states[].transitions` timestamps are when the **agent saw** the change, so each is
+  late by up to `poll_interval_ms`, and a transition pair that fell entirely between two
+  polls is invisible. Build percentiles from `completed_ms[]` only — `observed_ms` includes
+  the interval still open at the window edge, which is a lower bound, not a sample.
 
 ## Security
 
@@ -553,8 +636,8 @@ you do), then grant the agent these three permissions and nothing else.
 
 | Resource | Operation | Used by |
 |----------|-----------|---------|
-| `CLUSTER` | `DESCRIBE` | `Metadata` (brokers, controller, cluster ID), `ListGroups`, and `DescribeLogDirs` — the broker gates that whole handler on `DESCRIBE` of `CLUSTER`, so with `COLLECT_LOG_DIRS=true` this grant is load-bearing for a data section, not only for cluster metadata |
-| `TOPIC` | `DESCRIBE` | Topic and partition metadata; `ListOffsets` for start offsets, end offsets **and the `read_committed` last stable offset** — the broker authorizes `ListOffsets` before it reads the isolation level, so the LSO is the same API under the same grant; and the topics inside `OffsetFetch` |
+| `CLUSTER` | `DESCRIBE` | `Metadata` (brokers, controller, cluster ID), `ListGroups`, `DescribeLogDirs` — the broker gates that whole handler on `DESCRIBE` of `CLUSTER`, so with `COLLECT_LOG_DIRS=true` this grant is load-bearing for a data section, not only for cluster metadata — and `ListPartitionReassignments` |
+| `TOPIC` | `DESCRIBE` | Topic and partition metadata, including the KIP-430 authorized-operations bitfields; `ListOffsets` for start offsets, end offsets, the `read_committed` last stable offset **and the by-timestamp throughput window** — all one API key, and the broker authorizes it before reading the isolation level or the timestamp; `OffsetForLeaderEpoch`; and the topics inside `OffsetFetch` |
 | `GROUP` | `DESCRIBE` | `DescribeGroups`, `ConsumerGroupDescribe` and `OffsetFetch` |
 
 That is the complete set. `ApiVersions` (the startup probes) is answered before
@@ -564,10 +647,12 @@ The three grants were verified end to end against a broker with
 `allow.everyone.if.no.acl.found=false` and exactly this set (see
 [Local testing](#local-testing)), in both `stdout` and `http` export mode; removing any one
 of them degrades the corresponding section to `unauthorized` rather than silently emptying
-it. That verification ran with `COLLECT_LOG_DIRS` at its default of `false`, so the
-`DescribeLogDirs` row above is read from the broker's authorization rules rather than
-exercised. If you enable it under a restrictive ACL, check for a `log_dirs` section
-reporting `unauthorized` or `partial` on the first cycle it runs.
+it. Two entries above are read from the broker's authorization rules rather than exercised:
+`DescribeLogDirs`, because that run used the default `COLLECT_LOG_DIRS=false`, and
+`ListPartitionReassignments`, because its request fires only on an under-replicated
+partition and the test cluster never had one. `OffsetForLeaderEpoch` **was** verified
+directly, with a negative control. If you enable log dirs under a restrictive ACL, check for
+a `log_dirs` section reporting `unauthorized` or `partial` on the first cycle it runs.
 
 [SECURITY.md](SECURITY.md) states the same grants as a product invariant, together with
 what the agent sends where and what a batch does and does not contain — that is the file to
@@ -729,7 +814,7 @@ curl 'localhost:8088/batches?n=1' | jq
 Roughly seventy-five checks run on every batch, each with a greppable dotted code: gzip and
 `Content-Encoding` agreement, `Idempotency-Key` format and uniqueness, body-hash stability,
 `batch_seq` monotonicity and gap detection, strict decode with `DisallowUnknownFields`, the
-seven-section list and its ordering, per-section `error_count`, truncation accounting, and
+thirteen-section list and its ordering, per-section `error_count`, truncation accounting, and
 the data invariants. The one that matters most is `data.negative_lag`: a committed offset
 above the high watermark for the same partition, which is the runtime detector for the
 collector's phase-order constraint. `internal/mockingest/check.go` has the full list.
@@ -759,7 +844,7 @@ The agent takes no configuration on the command line — everything is environme
 variables — with one exception, `-version`:
 
 ```
-kafka-metrics-agent 2d403f8-dirty
+kafka-metrics-agent 3490f3f-dirty
 go: go1.26.5
 platform: darwin/arm64
 vcs: git, vcs.revision, vcs.time, vcs.modified   # only when the toolchain could stamp them

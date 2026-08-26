@@ -40,7 +40,12 @@ func (c *Collector) listGroups(ctx context.Context) (ids []string, dropped int, 
 // ListGroups call was issued, so SampledAt covers the listing too. listDropped
 // is how many groups MaxGroups removed: the count is reported once at batch
 // level, but this section must still admit it is short.
-func (c *Collector) collectGroups(ctx context.Context, ids []string, listDropped int, listErr error, listedAt time.Time) ([]metrics.GroupMetrics, *section) {
+//
+// The raw kadm result is returned alongside the shaped groups: kadm sets
+// IncludeAuthorizedOperations on every DescribeGroups, so the KIP-430 bitfields
+// are already in hand and the authorized-operations phase surfaces them without
+// a request of its own.
+func (c *Collector) collectGroups(ctx context.Context, ids []string, listDropped int, listErr error, listedAt time.Time) ([]metrics.GroupMetrics, kadm.DescribedGroups, *section) {
 	sec := c.newSectionAt(sectionGroups, listedAt)
 	defer sec.stop()
 
@@ -50,13 +55,13 @@ func (c *Collector) collectGroups(ctx context.Context, ids []string, listDropped
 
 	sec.request("ListGroups", listErr)
 	if len(ids) == 0 {
-		return nil, sec
+		return nil, nil, sec
 	}
 
 	described, err := c.client.Admin.DescribeGroups(ctx, ids...)
 	// A shard failure still returns the groups whose coordinators answered.
 	if !sec.request("DescribeGroups", err) && len(described) == 0 {
-		return nil, sec
+		return nil, nil, sec
 	}
 
 	groups := make([]metrics.GroupMetrics, 0, len(described))
@@ -140,7 +145,7 @@ func (c *Collector) collectGroups(ctx context.Context, ids []string, listDropped
 
 	c.enrichConsumerGroups(ctx, sec, groups)
 
-	return groups, sec
+	return groups, described, sec
 }
 
 // enrichConsumerGroups overlays ConsumerGroupDescribe (KIP-848) data onto groups

@@ -37,6 +37,14 @@ type Agent struct {
 	collector batchCollector
 	exporter  export.Exporter
 
+	// stateWatch is the fast group-state poll, nil when it is off. Run owns its
+	// goroutine; it stops with the signal context and needs no other shutdown.
+	stateWatch *collector.GroupStateWatcher
+	// caps is the startup fingerprint, stamped onto every batch. It is decided
+	// once because Probe caches it for the client's lifetime, so re-deriving it
+	// per cycle would ship the same bytes for another map allocation.
+	caps *metrics.ClusterCapabilities
+
 	startedAt time.Time
 	// batchSeq is monotonic from 1 per boot, and only ever touched from the
 	// single collection goroutine.
@@ -80,26 +88,27 @@ func New(cfg *config.Config, version string) (*Agent, error) {
 		logger.Info("group state filter active", "states", cfg.GroupStates)
 	}
 
-	// Same probe, opposite policy: degrade instead of refusing to start. A
-	// cluster below Kafka 4.0 has no new-protocol groups to describe, but the
-	// phase must be switched off explicitly or it is a rejected request every
-	// cycle for the life of that cluster.
-	opts := collectorOptions(cfg, logger)
-	if opts.CollectConsumerGroups {
-		supported, err := client.SupportsConsumerGroupDescribe(pingCtx)
-		switch {
-		case err != nil:
-			// A failed probe says nothing about the cluster's capability, so
-			// leave the phase on: a spurious disable would hide new-protocol
-			// groups on a cluster that can serve them.
-			logger.Warn("could not probe ConsumerGroupDescribe support, leaving consumer group describe enabled", "error", err)
-		case !supported:
-			opts.CollectConsumerGroups = false
-			logger.Info("ConsumerGroupDescribe unsupported by at least one broker, disabling it (KIP-848 needs Kafka 4.0+); classic group describe is unaffected")
-		default:
-			logger.Debug("ConsumerGroupDescribe supported")
-		}
+	// The same probe answers every remaining startup question; it is cached for
+	// the client's lifetime, so the gates below and the fingerprint on the wire
+	// cost one ApiVersions round trip per broker in total.
+	caps, err := client.Probe(pingCtx)
+	if err != nil {
+		// A failed probe says nothing about the cluster's capabilities, so every
+		// phase stays as configured: a spurious disable would hide data a
+		// perfectly capable cluster can serve. The phases that are silently wrong
+		// on an old broker are the reason this is logged loudly.
+		logger.Warn("could not probe broker api versions, leaving every optional phase as configured", "error", err)
+		caps = nil
 	}
+
+	watcher, err := newGroupStateWatcher(cfg, logger, client, caps)
+	if err != nil {
+		client.Close()
+		return nil, fmt.Errorf("create group state watcher: %w", err)
+	}
+
+	opts := collectorOptions(cfg, logger, watcher)
+	applyCapabilityGates(&opts, caps, logger)
 
 	coll, err := collector.New(client, opts)
 	if err != nil {
@@ -128,14 +137,83 @@ func New(cfg *config.Config, version string) (*Agent, error) {
 	logger.Info("export configured", "mode", cfg.ExportMode, "target", cfg.ExportTarget())
 
 	return &Agent{
-		cfg:       cfg,
-		logger:    logger,
-		version:   version,
-		client:    client,
-		collector: coll,
-		exporter:  exporter,
-		startedAt: time.Now(),
+		cfg:        cfg,
+		logger:     logger,
+		version:    version,
+		client:     client,
+		collector:  coll,
+		exporter:   exporter,
+		stateWatch: watcher,
+		caps:       caps.Wire(),
+		startedAt:  time.Now(),
 	}, nil
+}
+
+// applyCapabilityGates switches off the phases this cluster cannot serve.
+//
+// Every one of them degrades rather than refusing to start, unlike GROUP_STATES:
+// each is on by default or opt-in, so failing closed would refuse to start
+// against an older cluster the agent can still describe perfectly well. The
+// point of disabling rather than letting the request fail is that a skipped
+// section says "your broker is too old" once, where a failing one says "your
+// cluster is broken" every cycle forever — and for the two silent degradations
+// (the isolation level and the by-timestamp lookup) an enabled phase would ship
+// numbers that are wrong with nothing on the wire to say so.
+func applyCapabilityGates(opts *collector.Options, caps *kafka.Capabilities, logger *slog.Logger) {
+	if caps == nil {
+		return
+	}
+	for _, gate := range []struct {
+		on        *bool
+		supported bool
+		message   string
+	}{
+		{&opts.CollectConsumerGroups, caps.SupportsConsumerGroupDescribe(),
+			"ConsumerGroupDescribe unsupported by at least one broker, disabling it (KIP-848 needs Kafka 4.0+); classic group describe is unaffected"},
+		{&opts.CollectLastStableOffset, caps.SupportsListOffsetsIsolation(),
+			"ListOffsets carries no isolation level below v2 (Kafka 0.11+), disabling the last stable offset: the broker would answer with the high watermark and nothing on the wire would say so"},
+		{&opts.CollectThroughputWindow, caps.SupportsListOffsetsAfterMilli(),
+			"ListOffsets answers by timestamp only from v1 (Kafka 0.10.1+), disabling the throughput window: below it the broker returns old-style offsets and no timestamp, with no error"},
+		{&opts.CollectAuthorizedOps, caps.SupportsTopicAuthorizedOperations(),
+			"Metadata carries authorized operations only from v8 (Kafka 2.3+), disabling the ACL self-diagnostic rather than shipping empty grants that read as broken ACLs"},
+		{&opts.CollectReassignments, caps.SupportsListPartitionReassignments(),
+			"cluster does not serve ListPartitionReassignments (Kafka 2.4+), disabling it: a URP cannot be attributed to a planned move here"},
+		{&opts.CollectEpochProbes, caps.SupportsOffsetForLeaderEpoch(),
+			"cluster does not serve OffsetForLeaderEpoch (Kafka 0.11+), disabling truncation proof"},
+	} {
+		if *gate.on && !gate.supported {
+			*gate.on = false
+			logger.Info(gate.message)
+		}
+	}
+}
+
+// newGroupStateWatcher builds the fast group-state poll, or returns nil when it
+// is off or the cluster cannot serve it. It fails only on a malformed group
+// regex, which config.Load has already rejected.
+//
+// The capability is ListGroups v4 (KIP-518, Kafka 2.6+) — the version whose
+// response carries GroupState. Below it kadm leaves ListedGroup.State empty, so
+// every observation would be one meaningless transition per group: worse than
+// nothing, because it looks like data.
+func newGroupStateWatcher(cfg *config.Config, logger *slog.Logger, client *kafka.Client, caps *kafka.Capabilities) (*collector.GroupStateWatcher, error) {
+	if !cfg.CollectGroupStates {
+		return nil, nil
+	}
+	if caps != nil && !caps.SupportsGroupStatesFilter() {
+		logger.Info("ListGroups does not report group state below v4 (KIP-518, Kafka 2.6+), disabling the group state watch: every observation would be an empty state")
+		return nil, nil
+	}
+	return collector.NewGroupStateWatcher(client, collector.GroupStateWatchOptions{
+		PollInterval: cfg.GroupStatePollInterval,
+		// The same filter the collection cycle uses, or the fast poll and groups[]
+		// disagree about which groups exist.
+		GroupIncludeRegex:      cfg.GroupIncludeRegex,
+		GroupExcludeRegex:      cfg.GroupExcludeRegex,
+		MaxGroups:              cfg.MaxGroups,
+		MaxTransitionsPerGroup: cfg.MaxTransitionsPerGroup,
+		Logger:                 logger,
+	})
 }
 
 // collectorOptions translates the validated config into collector options. It
@@ -143,7 +221,11 @@ func New(cfg *config.Config, version string) (*Agent, error) {
 // every setting actually reaches the collector: GroupStates was once plumbed
 // into ListGroups but missing from this mapping, which made GROUP_STATES
 // silently dead — a gap no collector test could have caught.
-func collectorOptions(cfg *config.Config, logger *slog.Logger) collector.Options {
+//
+// watcher is a live object rather than a setting because the fast poll has to
+// start before the first cycle to have a baseline to transition from; it is
+// still built from config, so the sweep covers it.
+func collectorOptions(cfg *config.Config, logger *slog.Logger, watcher *collector.GroupStateWatcher) collector.Options {
 	return collector.Options{
 		Timeout:               cfg.CollectionTimeout,
 		IncludeInternalTopics: cfg.IncludeInternalTopics,
@@ -158,14 +240,25 @@ func collectorOptions(cfg *config.Config, logger *slog.Logger) collector.Options
 		CollectLogDirs:          cfg.CollectLogDirs,
 		LogDirsEvery:            cfg.LogDirsEvery,
 
+		CollectThroughputWindow: cfg.CollectThroughputWindow,
+		ThroughputWindowWidth:   cfg.ThroughputWindow,
+		ThroughputWindowEvery:   cfg.ThroughputWindowEvery,
+		CollectAuthorizedOps:    cfg.CollectAuthorizedOps,
+		AuthorizedOpsEvery:      cfg.AuthorizedOpsEvery,
+		CollectReassignments:    cfg.CollectReassignments,
+		CollectEpochProbes:      cfg.CollectEpochProbes,
+		CollectRPCStats:         cfg.CollectRPCStats,
+		GroupStateWatch:         watcher,
+
 		Limits: collector.Limits{
-			MaxErrors:             cfg.MaxErrors,
-			MaxErrorSamples:       cfg.MaxErrorSamples,
-			MaxTopics:             cfg.MaxTopics,
-			MaxPartitionsPerTopic: cfg.MaxPartitionsPerTopic,
-			MaxGroups:             cfg.MaxGroups,
-			MaxMembersPerGroup:    cfg.MaxMembersPerGroup,
-			MaxOffsetsPerGroup:    cfg.MaxOffsetsPerGroup,
+			MaxErrors:              cfg.MaxErrors,
+			MaxErrorSamples:        cfg.MaxErrorSamples,
+			MaxTopics:              cfg.MaxTopics,
+			MaxPartitionsPerTopic:  cfg.MaxPartitionsPerTopic,
+			MaxGroups:              cfg.MaxGroups,
+			MaxMembersPerGroup:     cfg.MaxMembersPerGroup,
+			MaxOffsetsPerGroup:     cfg.MaxOffsetsPerGroup,
+			MaxTransitionsPerGroup: cfg.MaxTransitionsPerGroup,
 		},
 		Logger: logger,
 	}
@@ -180,6 +273,14 @@ func (a *Agent) Run() error {
 
 	ticker := time.NewTicker(a.cfg.CollectionInterval)
 	defer ticker.Stop()
+
+	// Started before the first cycle, on the SIGNAL context rather than a
+	// per-cycle one: a state transition means nothing without a baseline to
+	// transition from, and the watch must outlive every individual cycle. It
+	// returns when ctx does, so there is nothing else to shut down.
+	if a.stateWatch != nil {
+		go a.stateWatch.Run(ctx)
+	}
 
 	a.runCycle(ctx)
 
@@ -251,7 +352,18 @@ func (a *Agent) stamp(batch *metrics.Batch) {
 	batch.AgentVersion = a.version
 	batch.AgentInstanceID = a.cfg.AgentInstanceID
 	batch.BatchSeq = a.batchSeq
+	// The "Y" in "grant DESCRIBE_CONFIGS on topic X to principal Y". Empty for
+	// mTLS and anonymous connections, where the broker derives the principal from
+	// the certificate and the agent cannot know it.
+	batch.Principal = a.cfg.SASLUsername
+	// Constant for the client's lifetime; the collector leaves it alone because
+	// the probe is a startup fact, not a per-cycle sample.
+	batch.Cluster.Capabilities = a.caps
 
+	// The collector owns the RPC window: it drains the hooks and emits the
+	// broker_rpc section from the same toggle, so the wholesale assignment below
+	// must not drop what it wrote.
+	rpc := batch.Agent.RPC
 	stats := a.exporter.Stats()
 	batch.Agent = metrics.AgentStats{
 		UptimeSec:        int64(time.Since(a.startedAt).Seconds()),
@@ -262,6 +374,7 @@ func (a *Agent) stamp(batch *metrics.Batch) {
 		ExportRetries:    stats.ExportRetries,
 		QueueDepth:       stats.QueueDepth,
 		LastExportError:  stats.LastError,
+		RPC:              rpc,
 	}
 }
 

@@ -48,11 +48,14 @@ const (
 // DefaultSections is the ordered set of sections every batch must carry, and the
 // only one whose relative order is asserted. That order is load-bearing:
 // committed offsets are sampled before high watermarks so lag cannot go
-// negative, and the LSO has to land between the two for read_committed lag to
-// stay non-negative. All seven are REQUIRED, including the two whose phases are
-// off by default: the collector emits every section on every cycle and marks one
-// it did not run as "skipped", so an absent section is a defect rather than a
-// configuration, and demoting them would forfeit the LSO ordering assertion.
+// negative, the LSO has to land between the two for read_committed lag to stay
+// non-negative, and the throughput window has to precede the high watermarks or
+// the record count it is the lower edge of comes out negative.
+//
+// All of them are REQUIRED, including the phases that are off by default or fire
+// only on a trigger: the collector emits every section on every cycle and marks
+// one it did not run as "skipped", so an absent section is a defect rather than
+// a configuration, and demoting them would forfeit the ordering assertion.
 //
 // DefaultOptionalSections holds names that may be absent and whose position is
 // not asserted. Both are Config fields rather than constants because
@@ -60,7 +63,11 @@ const (
 // arriving; an unknown name warns once instead of failing.
 var (
 	DefaultSections = []string{
-		"cluster", "topics", "topics_lso", "topics_end", "groups", "offsets", "log_dirs",
+		"cluster",
+		"topics", "topics_window", "topics_lso", "topics_end",
+		"groups", "offsets",
+		"group_states", "epoch_probes",
+		"log_dirs", "reassignments", "authorized_operations", "broker_rpc",
 	}
 	DefaultOptionalSections = []string{}
 )

@@ -406,19 +406,22 @@ func TestCollectTopicsAlwaysReturnsThreeSections(t *testing.T) {
 			if topics != nil {
 				t.Errorf("topics = %+v, want none", topics)
 			}
-			if len(secs) != 3 {
-				t.Fatalf("got %d sections, want topics, topics_lso, topics_end", len(secs))
-			}
+			// All three are built on every path: a backend must be able to tell
+			// "not collected" from "collected, empty".
+			ordered := []*section{secs.starts, secs.lso, secs.end}
 			for i, want := range []string{sectionTopics, sectionTopicsLSO, sectionTopicsEnd} {
-				if secs[i].name != want {
-					t.Errorf("section %d = %q, want %q", i, secs[i].name, want)
+				if ordered[i] == nil {
+					t.Fatalf("section %d (%s) is nil", i, want)
+				}
+				if ordered[i].name != want {
+					t.Errorf("section %d = %q, want %q", i, ordered[i].name, want)
 				}
 			}
-			if secs[0].status != tt.wantTopics {
-				t.Errorf("topics = %q, want %q", secs[0].status, tt.wantTopics)
+			if secs.starts.status != tt.wantTopics {
+				t.Errorf("topics = %q, want %q", secs.starts.status, tt.wantTopics)
 			}
 			// A phase that never issued a request is skipped, never ok.
-			for _, s := range secs[1:] {
+			for _, s := range ordered[1:] {
 				if s.status != metrics.SectionSkipped {
 					t.Errorf("section %q = %q, want skipped", s.name, s.status)
 				}

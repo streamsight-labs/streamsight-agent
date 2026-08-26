@@ -58,6 +58,50 @@ type Options struct {
 	// cadence for an O(replicas) response.
 	LogDirsEvery int
 
+	// CollectThroughputWindow issues ListOffsetsAfterMilli, the only rate input
+	// that survives an agent restart. It adds a ListOffsets fan-out — two on a
+	// mostly-silent cluster — to every cycle it runs on, so it defaults off.
+	// agent.New turns it off when the cluster cannot serve it.
+	CollectThroughputWindow bool
+	// ThroughputWindowWidth is how far back the window reaches. It earns its cost
+	// only when it is wider than the collection interval: inside one interval the
+	// backend can already difference two batches.
+	ThroughputWindowWidth time.Duration
+	// ThroughputWindowEvery runs the window phase on every Nth cycle; below 1
+	// means every cycle.
+	ThroughputWindowEvery int
+
+	// CollectAuthorizedOps issues one extra Metadata carrying the KIP-430
+	// bitfields, so a backend can turn "section: unauthorized" into "grant
+	// DESCRIBE_CONFIGS on topic X to principal Y". It needs no new ACL and
+	// defaults on.
+	CollectAuthorizedOps bool
+	// AuthorizedOpsEvery runs the ACL self-diagnostic on every Nth cycle; below 1
+	// means every cycle. Grants change on human timescales, and the request is
+	// O(partitions) of the selected topics.
+	AuthorizedOpsEvery int
+
+	// CollectReassignments asks the controller which under-replicated partitions
+	// are moving on purpose. It costs nothing in steady state — the request is
+	// issued only when a URP is observed — so it defaults on.
+	CollectReassignments bool
+
+	// CollectEpochProbes turns a committed-vs-current leader-epoch mismatch into
+	// positive proof of truncation. It issues nothing until a mismatch appears,
+	// so it defaults on.
+	CollectEpochProbes bool
+
+	// CollectRPCStats ships the counters the kgo hooks accumulate on traffic the
+	// agent already sends. Zero extra requests, so it defaults on.
+	CollectRPCStats bool
+
+	// GroupStateWatch is the fast group-state poll, or nil when the watch is off
+	// or the cluster is too old to populate ListedGroup.State. The agent owns its
+	// goroutine; the collector only drains it. It is a live object rather than a
+	// bool because the poll has to start before the first cycle to have a
+	// baseline to transition from.
+	GroupStateWatch *GroupStateWatcher
+
 	// Limits caps what one batch may contain. The zero value is unlimited.
 	Limits Limits
 
@@ -75,9 +119,18 @@ type Collector struct {
 	limits Limits
 	log    *slog.Logger
 
-	// cycle drives the log-dirs cadence. Atomic because nothing in this package's
-	// contract requires Collect to be called serially.
+	// stateWatch is the agent's fast group-state poll, nil when it is not
+	// running. The collector never starts or stops it.
+	stateWatch *GroupStateWatcher
+
+	// cycle drives the cadence of every phase that samples on every Nth cycle.
+	// Atomic because nothing in this package's contract requires Collect to be
+	// called serially.
 	cycle atomic.Uint64
+
+	// probed suppresses re-asking a leader-epoch question already answered; see
+	// probedEpochs.
+	probed probedEpochs
 }
 
 // New builds a Collector. It fails only on a malformed filter regex.
@@ -95,12 +148,13 @@ func New(client *kafka.Client, opts Options) (*Collector, error) {
 		log = slog.Default()
 	}
 	return &Collector{
-		client: client,
-		opts:   opts,
-		topics: topics,
-		groups: groups,
-		limits: opts.Limits,
-		log:    log,
+		client:     client,
+		opts:       opts,
+		topics:     topics,
+		groups:     groups,
+		limits:     opts.Limits,
+		log:        log,
+		stateWatch: opts.GroupStateWatch,
 	}, nil
 }
 
@@ -113,28 +167,47 @@ func New(client *kafka.Client, opts Options) (*Collector, error) {
 // never report -3, and a hung transaction must never report a negative backlog
 // and read as healthy.
 //
-//	cluster  ─┬─────────────────────────────► topics (start offsets)
-//	          │                                  │
-//	list groups ─┬─► groups (describe)           │ waits
-//	             └─► offsets (committed) ────────┤
-//	                                             ▼
-//	                            topics_lso (last stable offsets)
-//	                                             │
-//	                                             ▼
-//	                            topics_end (end offsets)
-//	                                             │
-//	                                             ▼
-//	                            log_dirs (every Nth cycle)
+//	cluster  ─┬──────────────────────────────► topics (start offsets)
+//	          │                                   │
+//	          └─► topics_window (every Nth) ──────┤ waits
+//	                                              │
+//	list groups ─┬─► groups (describe)            │ waits
+//	             └─► offsets (committed) ─────────┤
+//	                                              ▼
+//	                             topics_lso (last stable offsets)
+//	                                              │
+//	                                              ▼
+//	                             topics_end (end offsets)
+//	                                              │
+//	                    ┌─────────────────────────┼─────────────────────────┐
+//	                    ▼                         ▼                         ▼
+//	          log_dirs (every Nth)   reassignments (on a URP)   epoch_probes (on a
+//	                                                            committed-vs-current
+//	                                                            epoch mismatch)
 //
 // Each offset flavour gets its own section because each is sampled measurably
 // later than the last; see the section name constants.
 //
-// log_dirs is the one phase whose order does not matter for correctness. It
-// waits on the end-offset sample anyway, so its O(replicas) response cannot
-// inflate the very sample latency topics_end exists to pin down.
+// topics_window is in the chain for the same reason the others are: its offset
+// is the earlier edge of a record count whose later edge is the high watermark,
+// so issuing it after ListEndOffsets would make that count negative on a busy
+// partition. It hangs off the metadata rather than off the start offsets because
+// nothing orders it against them.
 //
-// AgentVersion, AgentInstanceID, BatchSeq and Agent are left zero for the agent
-// loop to fill in.
+// log_dirs, reassignments and epoch_probes are the phases whose order does not
+// matter for correctness. All three wait on the end-offset sample anyway, so
+// their responses — O(replicas) for the first, triggered fan-outs for the other
+// two — cannot inflate the very sample latency topics_end exists to pin down.
+// The two triggered phases read the batch's OWN topics[] and offsets[] rather
+// than raw metadata, so everything they emit has a join partner in the same
+// batch.
+//
+// group_states and broker_rpc are outside the graph entirely: both drain
+// accumulators and issue no request, so they run after wg.Wait(), which is what
+// makes the RPC window cover this cycle's own traffic.
+//
+// AgentVersion, AgentInstanceID, BatchSeq, Principal and the envelope half of
+// Agent are left zero for the agent loop to fill in.
 func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 	start := time.Now()
 
@@ -147,6 +220,7 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 	var (
 		metaDone      = make(chan struct{})
 		groupsListed  = make(chan struct{})
+		windowDone    = make(chan struct{})
 		committedDone = make(chan struct{})
 		endDone       = make(chan struct{})
 
@@ -158,18 +232,34 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		listErr       error
 		listStart     time.Time
 
-		topics  []metrics.TopicMetrics
-		groups  []metrics.GroupMetrics
-		offsets []metrics.ConsumerOffset
-		logDirs []metrics.LogDir
+		topics    []metrics.TopicMetrics
+		groups    []metrics.GroupMetrics
+		described kadm.DescribedGroups
+		offsets   []metrics.ConsumerOffset
+		logDirs   []metrics.LogDir
 
-		clusterSec, groupsSec, offsetsSec, logDirsSec *section
-		topicsSecs                                    []*section
+		window        *metrics.ThroughputWindow
+		windowOffsets *windowSample
+		reassignments []metrics.Reassignment
+		probes        []metrics.EpochProbe
+
+		clusterSec, windowSec, groupsSec, offsetsSec *section
+		logDirsSec, reassignSec, epochSec            *section
+		topicSecs                                    topicSections
 
 		wg sync.WaitGroup
 	)
 
-	wg.Add(5)
+	// The cycle counter is 0-based, so a freshly started agent samples every
+	// cadenced phase on its first cycle rather than N intervals in.
+	n := c.cycle.Add(1) - 1
+	var (
+		runWindow = runsThisCycle(c.opts.CollectThroughputWindow, c.opts.ThroughputWindowEvery, n)
+		runDirs   = runsThisCycle(c.opts.CollectLogDirs, c.opts.LogDirsEvery, n)
+		runAuth   = runsThisCycle(c.opts.CollectAuthorizedOps, c.opts.AuthorizedOpsEvery, n)
+	)
+
+	wg.Add(8)
 
 	// Cluster metadata. Everything topic-shaped depends on it.
 	go func() {
@@ -189,7 +279,7 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 	go func() {
 		defer wg.Done()
 		<-groupsListed
-		groups, groupsSec = c.collectGroups(ctx, groupIDs, groupsDropped, listErr, listStart)
+		groups, described, groupsSec = c.collectGroups(ctx, groupIDs, groupsDropped, listErr, listStart)
 	}()
 
 	// Committed offsets. Must complete before either ceiling — the last stable
@@ -203,17 +293,24 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		offsets, offsetsSec = c.collectOffsets(ctx, groupIDs, groupsDropped, listErr, internalTopics(topicDetails))
 	}()
 
+	// The server-measured window. It runs in parallel with the start offsets,
+	// and closing windowDone is what guarantees its request precedes the high
+	// watermarks rather than merely tending to.
+	go func() {
+		defer wg.Done()
+		defer close(windowDone)
+		<-metaDone
+		window, windowOffsets, windowSec = c.collectThroughputWindow(ctx, topicDetails, c.opts.ThroughputWindowWidth, runWindow)
+	}()
+
 	go func() {
 		defer wg.Done()
 		defer close(endDone)
 		<-metaDone
-		topics, topicsSecs = c.collectTopics(ctx, topicDetails, committedDone)
+		topics, topicSecs = c.collectTopics(ctx, topicDetails, committedDone, windowDone)
 	}()
 
-	// Log directories, on their own cadence. The counter is 0-based so a freshly
-	// started agent samples on its first cycle rather than N intervals in.
-	n := c.cycle.Add(1) - 1
-	runDirs := c.opts.CollectLogDirs && n%logDirsEvery(c.opts.LogDirsEvery) == 0
+	// Log directories, on their own cadence.
 	go func() {
 		defer wg.Done()
 		<-metaDone
@@ -221,21 +318,60 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		logDirs, logDirsSec = c.collectLogDirs(ctx, cluster, topicDetails, runDirs)
 	}()
 
+	// Reassignments, triggered by a URP in the topics this cycle is shipping.
+	go func() {
+		defer wg.Done()
+		<-endDone
+		reassignments, reassignSec = c.collectReassignments(ctx, topics, c.opts.CollectReassignments)
+	}()
+
+	// Leader-epoch probes, triggered by a committed epoch that disagrees with the
+	// partition's current one — which needs both finished phases.
+	go func() {
+		defer wg.Done()
+		<-committedDone
+		<-endDone
+		probes, epochSec = c.collectEpochProbes(ctx, c.opts.CollectEpochProbes, topics, offsets)
+	}()
+
 	wg.Wait()
 
+	// After the topics phase built the partitions, before finalize collects the
+	// errors this records.
+	windowOffsets.attach(topics)
+
 	batch := &metrics.Batch{
-		SchemaVersion: metrics.SchemaVersion,
-		CollectedAt:   start,
-		CollectionMs:  time.Since(start).Milliseconds(),
-		Cluster:       cluster,
-		Topics:        topics,
-		Groups:        groups,
-		Offsets:       offsets,
-		LogDirs:       logDirs,
+		SchemaVersion:    metrics.SchemaVersion,
+		CollectedAt:      start,
+		Cluster:          cluster,
+		Topics:           topics,
+		Groups:           groups,
+		Offsets:          offsets,
+		LogDirs:          logDirs,
+		ThroughputWindow: window,
+		Reassignments:    reassignments,
+		EpochProbes:      probes,
 	}
 
-	secs := append([]*section{clusterSec}, topicsSecs...)
-	secs = append(secs, groupsSec, offsetsSec, logDirsSec)
+	// Post-passes over the finished batch. The first stamps entries the topics
+	// and groups phases produced; the other two drain accumulators.
+	authSec := c.collectAuthorizedOps(ctx, batch, described, runAuth)
+	var statesSec, rpcSec *section
+	batch.GroupStates, statesSec = c.collectGroupStates(c.stateWatch)
+	batch.Agent.RPC, rpcSec = c.collectRPC(c.opts.CollectRPCStats)
+
+	// Stamped after the post-passes, not at the join: the authorized-operations
+	// phase issues a request of its own, and a collection_ms that excluded it
+	// would understate the cycle on exactly the cycles it runs.
+	batch.CollectionMs = time.Since(start).Milliseconds()
+
+	secs := []*section{
+		clusterSec,
+		topicSecs.starts, windowSec, topicSecs.lso, topicSecs.end,
+		groupsSec, offsetsSec,
+		statesSec, epochSec,
+		logDirsSec, reassignSec, authSec, rpcSec,
+	}
 	c.finalize(batch, secs, groupsDropped)
 
 	c.log.Debug("collected batch",
@@ -244,6 +380,8 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		"groups", len(batch.Groups),
 		"offsets", len(batch.Offsets),
 		"log_dirs", len(batch.LogDirs),
+		"reassignments", len(batch.Reassignments),
+		"epoch_probes", len(batch.EpochProbes),
 		"errors", len(batch.Errors),
 		"errors_collapsed", truncationOf(batch).ErrorsCollapsed,
 		"errors_dropped", truncationOf(batch).ErrorsDropped,
@@ -257,10 +395,10 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 // each section's ErrorsDropped and post-cap ErrorCount, so finish() cannot run
 // before it.
 //
-// secs must be in canonical wire order — cluster, topics, topics_lso,
-// topics_end, groups, offsets, log_dirs — because that is the order errors and
-// sections are emitted in. Every one is present on every cycle, skipped or not:
-// a missing section and an empty one mean different things.
+// secs must be in canonical wire order — the order of the section name block in
+// errors.go — because that is the order errors and sections are emitted in.
+// Every one is present on every cycle, skipped or not: a missing section and an
+// empty one mean different things.
 func (c *Collector) finalize(batch *metrics.Batch, secs []*section, groupsDropped int) {
 	batch.Errors, _ = mergeErrors(secs, c.limits.MaxErrors)
 
@@ -283,9 +421,15 @@ func (c *Collector) finalize(batch *metrics.Batch, secs []*section, groupsDroppe
 	}
 }
 
-// logDirsEvery clamps the cadence to at least one; zero would panic the modulo.
+// runsThisCycle reports whether a cadenced phase samples on cycle n, which is
+// 0-based.
+func runsThisCycle(enabled bool, every int, n uint64) bool {
+	return enabled && n%everyNth(every) == 0
+}
+
+// everyNth clamps a cadence to at least one; zero would panic the modulo.
 // config.Load already rejects both, so this only guards a hand-built Options.
-func logDirsEvery(every int) uint64 {
+func everyNth(every int) uint64 {
 	if every < 1 {
 		return 1
 	}

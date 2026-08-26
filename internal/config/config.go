@@ -64,6 +64,60 @@ const (
 	// every 30 seconds buys nothing.
 	DefaultLogDirsEvery = 10
 
+	// DefaultCollectThroughputWindow is OFF: the phase adds a ListOffsets
+	// fan-out — two on a mostly-silent cluster, because the broker re-lists every
+	// partition that answered -1 — to every cycle it runs on. It is the only rate
+	// input that survives an agent restart, but a backend that never misses a
+	// cycle can difference two batches instead.
+	DefaultCollectThroughputWindow = false
+	// DefaultThroughputWindow is ten times the default interval. The phase earns
+	// its cost only when the window is WIDER than COLLECTION_INTERVAL — inside one
+	// interval the backend can already difference two batches — and five minutes
+	// is the right denominator for a burn-down ETA.
+	DefaultThroughputWindow = 5 * time.Minute
+	// DefaultThroughputWindowEvery is every cycle: an operator who opted in wants
+	// a rate on every batch. The knob exists for wide clusters.
+	DefaultThroughputWindowEvery = 1
+
+	// DefaultCollectAuthorizedOps is ON: it turns "section: unauthorized" into
+	// "grant DESCRIBE_CONFIGS on topic X to principal Y", and it needs no ACL
+	// beyond the DESCRIBE the agent already requires.
+	DefaultCollectAuthorizedOps = true
+	// DefaultAuthorizedOpsEvery samples once per ten cycles. Grants change on
+	// human timescales, while the request is O(partitions) of the selected topics.
+	DefaultAuthorizedOpsEvery = 10
+
+	// DefaultCollectReassignments is ON: the request is issued only when a URP is
+	// observed, so it costs nothing in steady state and is the difference between
+	// "a broker is failing" and "an operator is rebalancing".
+	DefaultCollectReassignments = true
+
+	// DefaultCollectEpochProbes is ON for the same reason: nothing is issued
+	// until a committed leader epoch disagrees with the partition's current one,
+	// and it is the only positive proof of data loss the protocol offers.
+	DefaultCollectEpochProbes = true
+
+	// DefaultCollectRPCStats is ON because it is free: the counters come from
+	// hooks on requests the agent already sends, so the section costs no request
+	// and no ACL.
+	DefaultCollectRPCStats = true
+
+	// DefaultCollectGroupStates is OFF: unlike every other phase it is a SECOND
+	// ticker, one sharded ListGroups per tick — B requests per tick, 6×B per
+	// 30s interval at the default cadence — which is a cost an operator must opt
+	// into rather than inherit.
+	DefaultCollectGroupStates = false
+	// DefaultGroupStatePollInterval is the fast tick. A PreparingRebalance
+	// shorter than this is invisible, which is why it is far below the collection
+	// interval; the collector floors it at one second.
+	DefaultGroupStatePollInterval = 5 * time.Second
+	// DefaultMaxTransitionsPerGroup bounds the per-group transition list the fast
+	// poll accumulates between cycles. Unlike the entity caps this one has a
+	// positive default: a rebalance storm is exactly when the list is longest, so
+	// unbounded here means an unbounded batch during the incident it exists to
+	// describe.
+	DefaultMaxTransitionsPerGroup = 256
+
 	// DefaultMaxErrors is the one cap that defaults ON. Behind deduplication
 	// errors[] is already bounded by the number of distinct failure modes, so
 	// this backstop is for a pathological cluster, not a policy.
@@ -160,6 +214,19 @@ type Config struct {
 	CollectConsumerGroups   bool
 	CollectLogDirs          bool
 	LogDirsEvery            int
+	CollectThroughputWindow bool
+	ThroughputWindow        time.Duration
+	ThroughputWindowEvery   int
+	CollectAuthorizedOps    bool
+	AuthorizedOpsEvery      int
+	CollectReassignments    bool
+	CollectEpochProbes      bool
+	CollectRPCStats         bool
+	// CollectGroupStates runs a second, faster ticker than the collection loop;
+	// its window is drained onto the next batch. GroupStatePollInterval is its
+	// tick, and the only setting here that costs requests between cycles.
+	CollectGroupStates     bool
+	GroupStatePollInterval time.Duration
 
 	// Cardinality caps. Zero means unlimited for every entity cap; MaxErrors and
 	// MaxErrorSamples always have a positive default. They cap the batch, not
@@ -171,6 +238,9 @@ type Config struct {
 	MaxGroups             int
 	MaxMembersPerGroup    int
 	MaxOffsetsPerGroup    int
+	// MaxTransitionsPerGroup caps the fast poll's per-group transition list. It
+	// is the one cap with a positive default; see DefaultMaxTransitionsPerGroup.
+	MaxTransitionsPerGroup int
 
 	LogLevel        string
 	AgentInstanceID string
@@ -291,6 +361,38 @@ func Load() (*Config, error) {
 		p.errf("LOG_DIRS_EVERY must be >= 1 (1 = every cycle), got %d", c.LogDirsEvery)
 	}
 
+	c.CollectThroughputWindow = p.boolean("COLLECT_THROUGHPUT_WINDOW", DefaultCollectThroughputWindow)
+	// A zero width asks about "now": every partition answers -1, kadm re-lists
+	// every one of them as an end offset, and the cycle pays two fan-outs for a
+	// window of no width. A negative one asks about the future.
+	c.ThroughputWindow = p.duration("THROUGHPUT_WINDOW", DefaultThroughputWindow)
+	if c.ThroughputWindow <= 0 {
+		p.errf("THROUGHPUT_WINDOW must be > 0, got %s", c.ThroughputWindow)
+	}
+	c.ThroughputWindowEvery = p.integer("THROUGHPUT_WINDOW_EVERY", DefaultThroughputWindowEvery)
+	if c.ThroughputWindowEvery < 1 {
+		p.errf("THROUGHPUT_WINDOW_EVERY must be >= 1 (1 = every cycle), got %d", c.ThroughputWindowEvery)
+	}
+
+	c.CollectAuthorizedOps = p.boolean("COLLECT_AUTHORIZED_OPS", DefaultCollectAuthorizedOps)
+	c.AuthorizedOpsEvery = p.integer("AUTHORIZED_OPS_EVERY", DefaultAuthorizedOpsEvery)
+	if c.AuthorizedOpsEvery < 1 {
+		p.errf("AUTHORIZED_OPS_EVERY must be >= 1 (1 = every cycle), got %d", c.AuthorizedOpsEvery)
+	}
+
+	c.CollectReassignments = p.boolean("COLLECT_REASSIGNMENTS", DefaultCollectReassignments)
+	c.CollectEpochProbes = p.boolean("COLLECT_EPOCH_PROBES", DefaultCollectEpochProbes)
+	c.CollectRPCStats = p.boolean("COLLECT_RPC_STATS", DefaultCollectRPCStats)
+
+	c.CollectGroupStates = p.boolean("COLLECT_GROUP_STATES", DefaultCollectGroupStates)
+	c.GroupStatePollInterval = p.duration("GROUP_STATE_POLL_INTERVAL", DefaultGroupStatePollInterval)
+	if c.GroupStatePollInterval <= 0 {
+		// time.NewTicker panics on a non-positive duration, as with
+		// COLLECTION_INTERVAL. A tick below the collector's one-second floor is
+		// legal and clamped, so it warns rather than fails.
+		p.errf("GROUP_STATE_POLL_INTERVAL must be > 0, got %s", c.GroupStatePollInterval)
+	}
+
 	// A negative cap has no meaning, unlike EXPORT_FILE_MAX_MB where it disables
 	// rotation.
 	c.MaxErrors = p.integer("MAX_ERRORS", DefaultMaxErrors)
@@ -317,6 +419,11 @@ func Load() (*Config, error) {
 		if *lim.dst < 0 {
 			p.errf("%s must be >= 0 (0 = unlimited), got %d", lim.key, *lim.dst)
 		}
+	}
+	// Not in the loop above: it is the one cap whose default is not unlimited.
+	c.MaxTransitionsPerGroup = p.integer("MAX_TRANSITIONS_PER_GROUP", DefaultMaxTransitionsPerGroup)
+	if c.MaxTransitionsPerGroup < 0 {
+		p.errf("MAX_TRANSITIONS_PER_GROUP must be >= 0 (0 = unlimited), got %d", c.MaxTransitionsPerGroup)
 	}
 
 	c.LogLevel = strings.ToLower(strings.TrimSpace(p.str("LOG_LEVEL", DefaultLogLevel)))
@@ -404,6 +511,30 @@ func (c *Config) Warnings() []string {
 	if c.CollectLogDirs && c.LogDirsEvery == 1 {
 		w = append(w, fmt.Sprintf("COLLECT_LOG_DIRS=true with LOG_DIRS_EVERY=1 requests an O(replicas) response from every broker on every %s cycle", c.CollectionInterval))
 	}
+
+	if c.CollectThroughputWindow && c.ThroughputWindow < c.CollectionInterval {
+		// Not an error: the numbers stay true, they just stop being worth an
+		// extra fan-out.
+		w = append(w, fmt.Sprintf("THROUGHPUT_WINDOW (%s) is narrower than COLLECTION_INTERVAL (%s): a backend can already difference two batches over that span, so the extra ListOffsets fan-out buys nothing",
+			c.ThroughputWindow, c.CollectionInterval))
+	}
+	if c.CollectAuthorizedOps && c.AuthorizedOpsEvery == 1 {
+		w = append(w, fmt.Sprintf("COLLECT_AUTHORIZED_OPS=true with AUTHORIZED_OPS_EVERY=1 adds a Metadata request O(partitions of the selected topics) to every %s cycle, for grants that change on human timescales", c.CollectionInterval))
+	}
+
+	if c.CollectGroupStates {
+		// The only phase whose cost is not paid per cycle: it is a second ticker,
+		// so the request count scales with brokers × ticks, not with the batch.
+		w = append(w, fmt.Sprintf("COLLECT_GROUP_STATES=true polls ListGroups every %s: one request PER BROKER per tick, independent of COLLECTION_INTERVAL (%s)",
+			c.GroupStatePollInterval, c.CollectionInterval))
+		if c.GroupStatePollInterval >= c.CollectionInterval {
+			w = append(w, fmt.Sprintf("GROUP_STATE_POLL_INTERVAL (%s) is not below COLLECTION_INTERVAL (%s): the fast poll can see no transition the collection cycle would have missed",
+				c.GroupStatePollInterval, c.CollectionInterval))
+		}
+		if c.MaxTransitionsPerGroup == 0 {
+			w = append(w, "MAX_TRANSITIONS_PER_GROUP=0 leaves the fast poll's per-group transition list unbounded, which is worst during the rebalance storm it exists to describe")
+		}
+	}
 	return w
 }
 
@@ -453,9 +584,24 @@ func (c *Config) Redacted() string {
 	fmt.Fprintf(&b, " group_states=%s", orNone(strings.Join(c.GroupStates, ",")))
 	fmt.Fprintf(&b, " collect_last_stable_offset=%t collect_log_dirs=%t", c.CollectLastStableOffset, c.CollectLogDirs)
 	// Printing the cadence for a phase that never runs invites reading it as
-	// "log dirs are being collected".
+	// "log dirs are being collected". Same rule for every optional phase below.
 	if c.CollectLogDirs {
 		fmt.Fprintf(&b, " log_dirs_every=%d", c.LogDirsEvery)
+	}
+	fmt.Fprintf(&b, " collect_throughput_window=%t", c.CollectThroughputWindow)
+	if c.CollectThroughputWindow {
+		fmt.Fprintf(&b, " throughput_window=%s throughput_window_every=%d", c.ThroughputWindow, c.ThroughputWindowEvery)
+	}
+	fmt.Fprintf(&b, " collect_authorized_ops=%t", c.CollectAuthorizedOps)
+	if c.CollectAuthorizedOps {
+		fmt.Fprintf(&b, " authorized_ops_every=%d", c.AuthorizedOpsEvery)
+	}
+	fmt.Fprintf(&b, " collect_reassignments=%t collect_epoch_probes=%t collect_rpc_stats=%t",
+		c.CollectReassignments, c.CollectEpochProbes, c.CollectRPCStats)
+	fmt.Fprintf(&b, " collect_group_states=%t", c.CollectGroupStates)
+	if c.CollectGroupStates {
+		fmt.Fprintf(&b, " group_state_poll_interval=%s max_transitions_per_group=%d",
+			c.GroupStatePollInterval, c.MaxTransitionsPerGroup)
 	}
 	fmt.Fprintf(&b, " max_errors=%d max_error_samples=%d", c.MaxErrors, c.MaxErrorSamples)
 	// Only the caps that are set: five "=0" pairs on every startup line would

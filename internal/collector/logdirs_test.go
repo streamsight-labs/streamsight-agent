@@ -2,10 +2,13 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 
 	"kafka-metrics-agent/internal/metrics"
 )
@@ -20,11 +23,11 @@ func logDirCollector(t *testing.T, opts Options) *Collector {
 }
 
 func TestCollectLogDirsSkippedPathsIssueNoRequest(t *testing.T) {
-	// The nil client is the assertion: any path reaching DescribeAllLogDirs
-	// panics. An empty topic set must never fall through, because kadm encodes
-	// it as a NULL topics array and the broker reads null as "describe every
-	// directory on every broker" — the inverse of the filter, on the one section
-	// whose response is O(cluster).
+	// The nil client is the assertion: any path reaching the capability probe or
+	// the request panics. An empty topic set must never fall through, because a
+	// nil topics array encodes as NULL and the broker reads null as "describe
+	// every directory on every broker" — the inverse of the filter, on the one
+	// section whose response is O(cluster).
 	tds := kadm.TopicDetails{
 		"orders":             {Topic: "orders", Partitions: kadm.PartitionDetails{0: {Partition: 0}}},
 		"__consumer_offsets": {Topic: "__consumer_offsets", IsInternal: true, Partitions: kadm.PartitionDetails{0: {Partition: 0}}},
@@ -118,27 +121,324 @@ func TestLogDirTopicsHonoursTheTopicCaps(t *testing.T) {
 	}
 }
 
-func described(dirs ...kadm.DescribedLogDir) kadm.DescribedAllLogDirs {
-	all := kadm.DescribedAllLogDirs{}
-	for _, d := range dirs {
-		if all[d.Broker] == nil {
-			all[d.Broker] = kadm.DescribedLogDirs{}
-		}
-		all[d.Broker][d.Dir] = d
+func TestDescribeLogDirsRequestNeverEncodesANullTopicsArray(t *testing.T) {
+	// The nil array is the trap, not an edge case: kmsg encodes nil as NULL and
+	// the broker reads NULL as "describe every partition on every broker". The
+	// caller's empty-set guard is the first half of the defence; a non-nil array
+	// here is the second.
+	req := describeLogDirsRequest(nil)
+
+	if req.Topics == nil {
+		t.Fatal("Topics = nil, which asks the broker for the entire cluster")
 	}
-	return all
+	if len(req.Topics) != 0 {
+		t.Errorf("Topics = %+v, want empty", req.Topics)
+	}
+}
+
+func TestDescribeLogDirsRequestIsSortedAndNamesPartitions(t *testing.T) {
+	var set kadm.TopicsSet
+	set.Add("orders", 2)
+	set.Add("orders", 0)
+	set.Add("audit", 1)
+
+	req := describeLogDirsRequest(set)
+
+	if len(req.Topics) != 2 {
+		t.Fatalf("topics = %+v, want 2", req.Topics)
+	}
+	// Map order would make one cluster produce a different request every cycle.
+	if req.Topics[0].Topic != "audit" || req.Topics[1].Topic != "orders" {
+		t.Errorf("topics = %q, %q, want audit then orders", req.Topics[0].Topic, req.Topics[1].Topic)
+	}
+	got := req.Topics[1].Partitions
+	if len(got) != 2 || got[0] != 0 || got[1] != 2 {
+		t.Errorf("orders partitions = %v, want the sorted [0 2]", got)
+	}
+}
+
+// logDirsResp builds one broker's answer at the given version.
+func logDirsResp(version int16, dirs ...kmsg.DescribeLogDirsResponseDir) *kmsg.DescribeLogDirsResponse {
+	resp := kmsg.NewPtrDescribeLogDirsResponse()
+	resp.Version = version
+	resp.Dirs = dirs
+	return resp
+}
+
+// logDirsDir builds one directory with the KIP-827 defaults in place, so a test
+// that does not set them exercises the -1 sentinel the wire actually carries.
+func logDirsDir(dir string, parts ...kmsg.DescribeLogDirsResponseDirTopic) kmsg.DescribeLogDirsResponseDir {
+	d := kmsg.NewDescribeLogDirsResponseDir()
+	d.Dir = dir
+	d.Topics = parts
+	return d
+}
+
+func logDirsTopic(topic string, parts ...kmsg.DescribeLogDirsResponseDirTopicPartition) kmsg.DescribeLogDirsResponseDirTopic {
+	t := kmsg.NewDescribeLogDirsResponseDirTopic()
+	t.Topic = topic
+	t.Partitions = parts
+	return t
+}
+
+func logDirsPartition(partition int32, size, lag int64, future bool) kmsg.DescribeLogDirsResponseDirTopicPartition {
+	p := kmsg.NewDescribeLogDirsResponseDirTopicPartition()
+	p.Partition = partition
+	p.Size = size
+	p.OffsetLag = lag
+	p.IsFuture = future
+	return p
+}
+
+func okShard(node int32, resp *kmsg.DescribeLogDirsResponse) kgo.ResponseShard {
+	return kgo.ResponseShard{Meta: kgo.BrokerMetadata{NodeID: node}, Resp: resp}
+}
+
+func TestShardLogDirsCarriesVolumeBytes(t *testing.T) {
+	// The whole point of v4: growth with a denominator. Both figures are per
+	// VOLUME, so they are read straight off the dir rather than derived.
+	dir := logDirsDir("/data/1", logDirsTopic("orders", logDirsPartition(1, 4096, 3, false), logDirsPartition(0, 8, 0, true)))
+	dir.TotalBytes = 1 << 40
+	dir.UsableBytes = 1 << 30
+
+	dirs, err := shardLogDirs(okShard(1, logDirsResp(4, dir)))
+
+	if err != nil {
+		t.Fatalf("shardLogDirs: %v", err)
+	}
+	if len(dirs) != 1 {
+		t.Fatalf("dirs = %+v, want 1", dirs)
+	}
+	d := dirs[0]
+	if d.totalBytes == nil || *d.totalBytes != 1<<40 {
+		t.Errorf("total_bytes = %v, want %d", d.totalBytes, int64(1)<<40)
+	}
+	if d.usableBytes == nil || *d.usableBytes != 1<<30 {
+		t.Errorf("usable_bytes = %v, want %d", d.usableBytes, int64(1)<<30)
+	}
+	// Broker order is not guaranteed, and a batch must be diffable.
+	if len(d.partitions) != 2 || d.partitions[0].Partition != 0 || d.partitions[1].Partition != 1 {
+		t.Fatalf("partitions = %+v, want partition 0 then 1", d.partitions)
+	}
+	if p := d.partitions[1]; p.Size != 4096 || p.OffsetLag != 3 || p.IsFuture {
+		t.Errorf("partition = %+v, want size 4096, lag 3, not future", p)
+	}
+	if !d.partitions[0].IsFuture {
+		t.Error("an in-flight JBOD move must be flagged; it explains disk growth that reads as runaway")
+	}
+}
+
+func TestShardLogDirsTranslatesTheNotAvailableSentinel(t *testing.T) {
+	// -1 is the broker saying "I could not stat this volume", and it is also
+	// what an older broker leaves behind because the fields are not on the wire
+	// at all. A -1 shipped as a byte count is a disk of negative size.
+	for _, tt := range []struct {
+		name    string
+		version int16
+		total   int64
+		usable  int64
+	}{
+		{name: "v4 broker that could not stat the volume", version: 4, total: -1, usable: -1},
+		{name: "v3 broker that never sent the fields", version: 3, total: -1, usable: -1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := logDirsDir("/data/1")
+			dir.TotalBytes = tt.total
+			dir.UsableBytes = tt.usable
+
+			dirs, err := shardLogDirs(okShard(1, logDirsResp(tt.version, dir)))
+
+			if err != nil {
+				t.Fatalf("shardLogDirs: %v", err)
+			}
+			if dirs[0].totalBytes != nil || dirs[0].usableBytes != nil {
+				t.Errorf("volume figures = %v/%v, want null, never a negative size",
+					dirs[0].totalBytes, dirs[0].usableBytes)
+			}
+			// Null capacity must not take the directory's contents with it.
+			if dirs[0].partitions == nil {
+				t.Error("partitions = nil, want an empty list: the directory was read, it is simply empty")
+			}
+		})
+	}
+}
+
+func TestShardLogDirsKeepsADirectoryErrorOnTheDirectory(t *testing.T) {
+	// A directory-level error is the only positive identification of an offline
+	// log dir from the broker that owns it.
+	dir := logDirsDir("/mnt/kafka-3")
+	dir.ErrorCode = kerr.KafkaStorageError.Code
+
+	dirs, err := shardLogDirs(okShard(7, logDirsResp(4, dir)))
+
+	if err != nil {
+		t.Fatalf("a dead disk is not a failed shard: %v", err)
+	}
+	if !errors.Is(dirs[0].err, kerr.KafkaStorageError) {
+		t.Errorf("err = %v, want KAFKA_STORAGE_ERROR", dirs[0].err)
+	}
+	// nil, not empty: "the broker could not read this directory" is not "this
+	// directory holds nothing".
+	if dirs[0].partitions != nil {
+		t.Errorf("partitions = %+v, want nil on an offline directory", dirs[0].partitions)
+	}
+}
+
+func TestShardLogDirsTreatsATopLevelErrorAsThisBrokersRefusal(t *testing.T) {
+	// The top-level code exists from v3 (Kafka 3.2). It is one broker's answer,
+	// so it must travel as a shard error and not as a verdict on the cluster.
+	resp := logDirsResp(4, logDirsDir("/data/1"))
+	resp.ErrorCode = kerr.ClusterAuthorizationFailed.Code
+
+	dirs, err := shardLogDirs(okShard(3, resp))
+
+	if !errors.Is(err, kerr.ClusterAuthorizationFailed) {
+		t.Fatalf("err = %v, want CLUSTER_AUTHORIZATION_FAILED", err)
+	}
+	if dirs != nil {
+		t.Errorf("dirs = %+v, want none: the broker refused before naming any", dirs)
+	}
+}
+
+func TestShardLogDirsRejectsAnUnexpectedResponseType(t *testing.T) {
+	shard := kgo.ResponseShard{Meta: kgo.BrokerMetadata{NodeID: 1}, Resp: kmsg.NewPtrMetadataResponse()}
+
+	if _, err := shardLogDirs(shard); !errors.Is(err, errNotLogDirsResponse) {
+		t.Errorf("err = %v, want errNotLogDirsResponse rather than a panic mid-cycle", err)
+	}
+}
+
+func TestLogDirShardsKeepsTheBrokersThatAnswered(t *testing.T) {
+	// One denied or dead broker must not discard the dirs the others reported:
+	// a thirty-broker cluster with one bad shard is a partial section, not a
+	// cluster with no disks.
+	shards := []kgo.ResponseShard{
+		okShard(1, logDirsResp(4, logDirsDir("/data/1"))),
+		{Meta: kgo.BrokerMetadata{NodeID: 2}, Err: kerr.ClusterAuthorizationFailed},
+	}
+
+	report, err := logDirShards(shards)
+
+	if len(report) != 1 || report[1] == nil {
+		t.Fatalf("report = %+v, want broker 1's directories kept", report)
+	}
+	var shardErrs *kadm.ShardErrors
+	if !errors.As(err, &shardErrs) {
+		t.Fatalf("err = %v, want a *kadm.ShardErrors so section.request maps it as usual", err)
+	}
+	if shardErrs.AllFailed {
+		t.Error("AllFailed = true, but broker 1 answered")
+	}
+
+	sec := newSection(sectionLogDirs)
+	if !sec.request(apiDescribeLogDirs, err) {
+		t.Error("request() = false, but half the cluster's bytes are still true")
+	}
+	if sec.status != metrics.SectionPartial {
+		t.Errorf("log_dirs = %q, want partial", sec.status)
+	}
+	if len(sec.errs) != 1 {
+		t.Fatalf("errs = %+v, want the one denied broker", sec.errs)
+	}
+	if e := sec.errs[0]; e.BrokerID == nil || *e.BrokerID != 2 || e.Kind != kindAuthorization {
+		t.Errorf("error = %+v, want an authorization failure attributed to broker 2", e)
+	}
+}
+
+func TestLogDirShardsReportsAWhollyDeniedFanOut(t *testing.T) {
+	shards := []kgo.ResponseShard{
+		{Meta: kgo.BrokerMetadata{NodeID: 1}, Err: kerr.ClusterAuthorizationFailed},
+		{Meta: kgo.BrokerMetadata{NodeID: 2}, Err: kerr.ClusterAuthorizationFailed},
+	}
+
+	report, err := logDirShards(shards)
+
+	if len(report) != 0 {
+		t.Fatalf("report = %+v, want nothing", report)
+	}
+	sec := newSection(sectionLogDirs)
+	if sec.request(apiDescribeLogDirs, err) {
+		t.Error("request() = true, but no broker answered")
+	}
+	if sec.status != metrics.SectionUnauthorized {
+		t.Errorf("log_dirs = %q, want unauthorized: the ACL is the actionable cause", sec.status)
+	}
+}
+
+func TestLogDirShardsAttributesAShardThatNeverReachedABroker(t *testing.T) {
+	// kgo answers with node ID -1 when it could not map the request to a broker.
+	// A -1 must not be reported as a broker ID, and must not become a report key.
+	shards := []kgo.ResponseShard{{Meta: kgo.BrokerMetadata{NodeID: -1}, Err: errors.New("no broker for topic")}}
+
+	report, err := logDirShards(shards)
+
+	if len(report) != 0 {
+		t.Fatalf("report = %+v, want nothing keyed under a non-existent broker", report)
+	}
+	sec := newSection(sectionLogDirs)
+	sec.request(apiDescribeLogDirs, err)
+	if len(sec.errs) != 1 {
+		t.Fatalf("errs = %+v, want one", sec.errs)
+	}
+	if sec.errs[0].BrokerID != nil {
+		t.Errorf("broker_id = %d, want null: no broker was reached", *sec.errs[0].BrokerID)
+	}
+}
+
+func TestKadmLogDirsLeavesTheVolumeFiguresNull(t *testing.T) {
+	// The pre-v4 path is kept verbatim, and kadm's DescribedLogDir is
+	// {Broker, Dir, Topics, Err}: the KIP-827 fields never reach the agent, so
+	// null is the only honest answer. A fabricated zero would read as a disk
+	// that is permanently 100% full.
+	described := kadm.DescribedAllLogDirs{1: kadm.DescribedLogDirs{
+		"/data/1": {Broker: 1, Dir: "/data/1", Topics: kadm.DescribedLogDirTopics{
+			"orders": {0: {Broker: 1, Dir: "/data/1", Topic: "orders", Partition: 0, Size: 4096, OffsetLag: 3}},
+		}},
+	}}
+
+	report := kadmLogDirs(described)
+
+	if len(report[1]) != 1 {
+		t.Fatalf("report = %+v, want one directory on broker 1", report)
+	}
+	d := report[1][0]
+	if d.totalBytes != nil || d.usableBytes != nil {
+		t.Errorf("volume figures = %v/%v, want null below DescribeLogDirs v4", d.totalBytes, d.usableBytes)
+	}
+	if len(d.partitions) != 1 || d.partitions[0].Size != 4096 || d.partitions[0].OffsetLag != 3 {
+		t.Errorf("partitions = %+v, want the replica kadm decoded", d.partitions)
+	}
+}
+
+func TestKadmLogDirsKeepsABrokerThatNamedNoDirectory(t *testing.T) {
+	// Presence in the report is the silent-refusal tell; an empty slice must not
+	// collapse into an absent broker.
+	report := kadmLogDirs(kadm.DescribedAllLogDirs{1: kadm.DescribedLogDirs{}})
+
+	if dirs, ok := report[1]; !ok || len(dirs) != 0 {
+		t.Errorf("report = %+v, want broker 1 present with no directories", report)
+	}
+}
+
+func report(dirs ...describedDir) logDirReport {
+	r := logDirReport{}
+	for _, d := range dirs {
+		r[d.broker] = append(r[d.broker], d)
+	}
+	return r
 }
 
 func TestBuildLogDirsShapesReplicaStorage(t *testing.T) {
 	sec := newSection(sectionLogDirs)
-	all := described(
-		kadm.DescribedLogDir{Broker: 2, Dir: "/data/1", Topics: kadm.DescribedLogDirTopics{
-			"orders": {0: {Broker: 2, Dir: "/data/1", Topic: "orders", Partition: 0, Size: 4096, OffsetLag: 3}},
+	total, usable := int64(1<<40), int64(1<<30)
+	all := report(
+		describedDir{broker: 2, dir: "/data/1", totalBytes: &total, usableBytes: &usable, partitions: []metrics.LogDirPartition{
+			{Topic: "orders", Partition: 0, Size: 4096, OffsetLag: 3},
 		}},
-		kadm.DescribedLogDir{Broker: 1, Dir: "/data/2", Topics: kadm.DescribedLogDirTopics{
-			"orders": {1: {Broker: 1, Dir: "/data/2", Topic: "orders", Partition: 1, Size: 8, IsFuture: true}},
+		describedDir{broker: 1, dir: "/data/2", partitions: []metrics.LogDirPartition{
+			{Topic: "orders", Partition: 1, Size: 8, IsFuture: true},
 		}},
-		kadm.DescribedLogDir{Broker: 1, Dir: "/data/1", Topics: kadm.DescribedLogDirTopics{}},
+		describedDir{broker: 1, dir: "/data/1", partitions: []metrics.LogDirPartition{}},
 	)
 	cluster := metrics.ClusterMetrics{Brokers: []metrics.Broker{{ID: 1}, {ID: 2}}}
 
@@ -163,10 +463,13 @@ func TestBuildLogDirsShapesReplicaStorage(t *testing.T) {
 	if !dirs[1].Partitions[0].IsFuture {
 		t.Error("an in-flight JBOD move must be flagged; it explains disk growth that reads as runaway")
 	}
-	// KIP-827 volume figures stay null until the raw-kmsg path exists; the
-	// fields are declared so filling them in later is not a schema change.
+	// The denominator reaches the wire on the directory that reported it, and
+	// stays null on the ones that did not.
+	if dirs[2].TotalBytes == nil || *dirs[2].TotalBytes != total || dirs[2].UsableBytes == nil || *dirs[2].UsableBytes != usable {
+		t.Errorf("volume figures = %v/%v, want %d/%d", dirs[2].TotalBytes, dirs[2].UsableBytes, total, usable)
+	}
 	if dirs[0].TotalBytes != nil || dirs[0].UsableBytes != nil {
-		t.Error("total_bytes/usable_bytes must be null: kadm drops them")
+		t.Error("total_bytes/usable_bytes must stay null when the broker did not report them")
 	}
 	// An empty directory on a broker that reported other directories is a real
 	// empty disk, not a refusal.
@@ -180,7 +483,7 @@ func TestBuildLogDirsReportsAnOfflineDirectory(t *testing.T) {
 	// log dir from the broker that owns it; offline_replicas in metadata is a
 	// peer's opinion.
 	sec := newSection(sectionLogDirs)
-	all := described(kadm.DescribedLogDir{Broker: 7, Dir: "/mnt/kafka-3", Err: kerr.KafkaStorageError})
+	all := report(describedDir{broker: 7, dir: "/mnt/kafka-3", err: kerr.KafkaStorageError})
 	cluster := metrics.ClusterMetrics{Brokers: []metrics.Broker{{ID: 7}}}
 
 	dirs := buildLogDirs(all, cluster, sec)
@@ -213,7 +516,7 @@ func TestBuildLogDirsDetectsSilentRefusal(t *testing.T) {
 	// code, so a broker that declines answers with an empty result and no
 	// error. Without this check it is byte-identical to a healthy cluster.
 	sec := newSection(sectionLogDirs)
-	all := kadm.DescribedAllLogDirs{1: kadm.DescribedLogDirs{}}
+	all := logDirReport{1: {}}
 	cluster := metrics.ClusterMetrics{Brokers: []metrics.Broker{{ID: 1}, {ID: 2}}}
 
 	dirs := buildLogDirs(all, cluster, sec)
@@ -232,15 +535,15 @@ func TestBuildLogDirsDetectsSilentRefusal(t *testing.T) {
 	}
 }
 
-func TestLogDirsEveryClampsToEveryCycle(t *testing.T) {
+func TestEveryNthClampsToEveryCycle(t *testing.T) {
 	// The value is a modulus, so zero would panic.
 	for _, in := range []int{-5, 0, 1} {
-		if got := logDirsEvery(in); got != 1 {
-			t.Errorf("logDirsEvery(%d) = %d, want 1", in, got)
+		if got := everyNth(in); got != 1 {
+			t.Errorf("everyNth(%d) = %d, want 1", in, got)
 		}
 	}
-	if got := logDirsEvery(10); got != 10 {
-		t.Errorf("logDirsEvery(10) = %d, want 10", got)
+	if got := everyNth(10); got != 10 {
+		t.Errorf("everyNth(10) = %d, want 10", got)
 	}
 }
 
@@ -251,7 +554,7 @@ func TestLogDirsCadence(t *testing.T) {
 	var ran []int
 	for i := 0; i < 7; i++ {
 		n := c.cycle.Add(1) - 1
-		if n%logDirsEvery(c.opts.LogDirsEvery) == 0 {
+		if runsThisCycle(c.opts.CollectLogDirs, c.opts.LogDirsEvery, n) {
 			ran = append(ran, i)
 		}
 	}

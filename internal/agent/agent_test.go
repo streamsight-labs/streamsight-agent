@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"kafka-metrics-agent/internal/collector"
 	"kafka-metrics-agent/internal/config"
 	"kafka-metrics-agent/internal/export"
 	"kafka-metrics-agent/internal/metrics"
@@ -156,6 +157,70 @@ func TestRunCycleStampsEnvelopeAndIncrementsBatchSeq(t *testing.T) {
 	}
 }
 
+// stamp() assigns AgentStats wholesale, so the RPC window the collector already
+// wrote into the same struct is one edit away from being silently dropped —
+// which would look exactly like an agent whose hooks are not installed.
+func TestStampKeepsTheCollectorsRPCWindowAndAddsTheIdentity(t *testing.T) {
+	rpc := &metrics.RPCStats{WindowMs: 30_000, Brokers: []metrics.BrokerRPC{{BrokerID: 1}}}
+	coll := &fakeCollector{batch: &metrics.Batch{Agent: metrics.AgentStats{RPC: rpc}}}
+	exp := &fakeExporter{}
+
+	a := newTestAgent(t, coll, exp)
+	a.cfg.SASLUsername = "streamsight-agent"
+	a.caps = &metrics.ClusterCapabilities{Features: map[string]bool{metrics.CapabilityLastStableOffset: true}}
+	a.runCycle(context.Background())
+
+	got := exp.seen()
+	if len(got) != 1 {
+		t.Fatalf("exported %d batches, want 1", len(got))
+	}
+	b := got[0]
+	if b.Agent.RPC != rpc {
+		t.Errorf("agent.rpc = %+v, want the collector's window %+v", b.Agent.RPC, rpc)
+	}
+	// The envelope half must still be filled in around it.
+	if b.Agent.BatchesCollected != 1 {
+		t.Errorf("BatchesCollected = %d, want 1", b.Agent.BatchesCollected)
+	}
+	// The subject of "grant X on Y to Z", which the collector cannot know.
+	if b.Principal != "streamsight-agent" {
+		t.Errorf("principal = %q, want the SASL username", b.Principal)
+	}
+	if b.Cluster.Capabilities != a.caps {
+		t.Errorf("cluster.capabilities = %+v, want the startup fingerprint", b.Cluster.Capabilities)
+	}
+}
+
+// An anonymous or mTLS connection has no username the agent can know, and an
+// invented one would name a principal that does not exist in any ACL.
+func TestStampLeavesThePrincipalEmptyWithoutSASL(t *testing.T) {
+	exp := &fakeExporter{}
+	a := newTestAgent(t, &fakeCollector{}, exp)
+	a.runCycle(context.Background())
+
+	if got := exp.seen()[0]; got.Principal != "" {
+		t.Errorf("principal = %q, want empty", got.Principal)
+	}
+}
+
+// A probe that failed says nothing about the cluster, so a spurious disable
+// would hide data a perfectly capable cluster can serve.
+func TestCapabilityGatesLeaveEveryPhaseAloneWhenTheProbeFailed(t *testing.T) {
+	opts := collector.Options{
+		CollectConsumerGroups:   true,
+		CollectLastStableOffset: true,
+		CollectThroughputWindow: true,
+		CollectAuthorizedOps:    true,
+		CollectReassignments:    true,
+		CollectEpochProbes:      true,
+	}
+	want := opts
+	applyCapabilityGates(&opts, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if !reflect.DeepEqual(opts, want) {
+		t.Errorf("options = %+v, want them untouched: %+v", opts, want)
+	}
+}
+
 func TestRunCycleAppliesCollectionTimeout(t *testing.T) {
 	coll := &fakeCollector{}
 	a := newTestAgent(t, coll, &fakeExporter{})
@@ -250,16 +315,37 @@ func TestCollectorOptionsCarryEveryConfiguredSetting(t *testing.T) {
 		CollectLogDirs:          true,
 		LogDirsEvery:            7,
 
-		MaxErrors:             11,
-		MaxErrorSamples:       2,
-		MaxTopics:             3,
-		MaxPartitionsPerTopic: 4,
-		MaxGroups:             5,
-		MaxMembersPerGroup:    6,
-		MaxOffsetsPerGroup:    8,
+		CollectThroughputWindow: true,
+		ThroughputWindow:        90 * time.Second,
+		ThroughputWindowEvery:   2,
+		CollectAuthorizedOps:    true,
+		AuthorizedOpsEvery:      9,
+		CollectReassignments:    true,
+		CollectEpochProbes:      true,
+		CollectRPCStats:         true,
+		CollectGroupStates:      true,
+		GroupStatePollInterval:  2 * time.Second,
+
+		MaxErrors:              11,
+		MaxErrorSamples:        2,
+		MaxTopics:              3,
+		MaxPartitionsPerTopic:  4,
+		MaxGroups:              5,
+		MaxMembersPerGroup:     6,
+		MaxOffsetsPerGroup:     8,
+		MaxTransitionsPerGroup: 12,
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	opts := collectorOptions(cfg, logger)
+	// The watcher is the one option that is an object rather than a value; it is
+	// still built from config, so the sweep below must see it.
+	watcher, err := newGroupStateWatcher(cfg, logger, nil, nil)
+	if err != nil {
+		t.Fatalf("newGroupStateWatcher: %v", err)
+	}
+	if watcher == nil {
+		t.Fatal("COLLECT_GROUP_STATES is set, so a watcher must have been built")
+	}
+	opts := collectorOptions(cfg, logger, watcher)
 
 	if !reflect.DeepEqual(opts.GroupStates, cfg.GroupStates) {
 		t.Errorf("GroupStates = %v, want %v", opts.GroupStates, cfg.GroupStates)

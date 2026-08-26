@@ -1,10 +1,15 @@
 package collector
 
 import (
+	"context"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/twmb/franz-go/pkg/kerr"
 
+	"kafka-metrics-agent/internal/config"
+	"kafka-metrics-agent/internal/kafka"
 	"kafka-metrics-agent/internal/metrics"
 )
 
@@ -109,20 +114,29 @@ func TestFinalizeReportsCollapsedErrorsAtBatchLevel(t *testing.T) {
 	}
 }
 
+// canonicalSections is the wire order Collect emits, and the order every
+// section-order assertion in this package is written against. Keeping it here
+// rather than inline is what makes the next added phase a one-line change with a
+// failing test behind it.
+var canonicalSections = []string{
+	sectionCluster,
+	sectionTopics, sectionTopicsWindow, sectionTopicsLSO, sectionTopicsEnd,
+	sectionGroups, sectionOffsets,
+	sectionGroupStates, sectionEpochProbes,
+	sectionLogDirs, sectionReassignments, sectionAuthorizedOps, sectionBrokerRPC,
+}
+
 func TestFinalizeEmitsEverySectionEvenWhenSkipped(t *testing.T) {
-	// The wire contract: seven sections, in this order, on every cycle. A
-	// section that disappears on the cycles it was skipped would destroy the
-	// "did not run" vs "ran and found nothing" distinction — which is what makes
-	// the optional collectors safe to default off.
+	// The wire contract: every section, in this order, on every cycle. A section
+	// that disappears on the cycles it was skipped would destroy the "did not
+	// run" vs "ran and found nothing" distinction — which is what makes the
+	// optional and trigger-driven collectors safe to default off.
 	c, err := New(nil, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	wantOrder := []string{
-		sectionCluster, sectionTopics, sectionTopicsLSO, sectionTopicsEnd,
-		sectionGroups, sectionOffsets, sectionLogDirs,
-	}
+	wantOrder := canonicalSections
 	secs := make([]*section, 0, len(wantOrder))
 	for _, name := range wantOrder {
 		s := newSection(name)
@@ -153,6 +167,64 @@ func TestFinalizeEmitsEverySectionEvenWhenSkipped(t *testing.T) {
 	// A skipped phase is not a degraded one.
 	if batch.Truncation != nil || len(batch.Errors) != 0 {
 		t.Errorf("skipping a phase must not look like a failure: %+v %+v", batch.Truncation, batch.Errors)
+	}
+}
+
+// Collect against a cluster that is not there. Every request fails, which is
+// precisely the path that must still produce the full section list — and it is
+// the only test that drives the goroutine graph end to end, so a phase waiting
+// on a channel nobody closes deadlocks here rather than in production.
+func TestCollectEmitsEverySectionInOrderAgainstADeadCluster(t *testing.T) {
+	// Port 1 refuses immediately: the point is a failing cluster, not a slow one.
+	client, err := kafka.NewClient(&config.Config{
+		KafkaBrokers:       []string{"127.0.0.1:1"},
+		AgentInstanceID:    "test",
+		CollectionInterval: time.Second,
+		CollectionTimeout:  time.Second,
+	}, "test")
+	if err != nil {
+		t.Fatalf("kafka.NewClient: %v", err)
+	}
+	defer client.Close()
+
+	// Every optional phase on, so no section owes its presence to being skipped
+	// by configuration.
+	c, err := New(client, Options{
+		Timeout:                 2 * time.Second,
+		CollectLastStableOffset: true,
+		CollectLogDirs:          true,
+		CollectThroughputWindow: true,
+		ThroughputWindowWidth:   time.Minute,
+		CollectAuthorizedOps:    true,
+		CollectReassignments:    true,
+		CollectEpochProbes:      true,
+		CollectRPCStats:         true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	batch := c.Collect(context.Background())
+
+	names := make([]string, 0, len(batch.Sections))
+	for _, s := range batch.Sections {
+		names = append(names, s.Name)
+	}
+	if !slices.Equal(names, canonicalSections) {
+		t.Fatalf("sections = %v, want %v", names, canonicalSections)
+	}
+	// The one section that cannot fail: it reads counters, and the failed dials
+	// are themselves part of what it reports.
+	for _, s := range batch.Sections {
+		if s.Name == sectionBrokerRPC && s.Status != metrics.SectionOK {
+			t.Errorf("broker_rpc = %q, want ok: the snapshot issues no request", s.Status)
+		}
+		if s.SampledAt.IsZero() {
+			t.Errorf("section %q has no sampled_at", s.Name)
+		}
+	}
+	if batch.Agent.RPC == nil {
+		t.Error("agent.rpc is nil: the collector owns the window and must fill it")
 	}
 }
 

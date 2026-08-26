@@ -55,20 +55,26 @@ func (c *Collector) collectCluster(ctx context.Context) (metrics.ClusterMetrics,
 // Only this order keeps all four non-negative at once. Running the LSO call
 // concurrently with, or after, ListEndOffsets would let the backlog go negative
 // and a hung transaction would silently read as "not hung".
-func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, committed <-chan struct{}) ([]metrics.TopicMetrics, []*section) {
+//
+// before are the phases whose own samples must precede the two ceilings: the
+// committed offsets, and — when it runs — the throughput window, whose
+// ListOffsetsAfterMilli is the earlier edge of a record count that ends at the
+// high watermark. Each is a channel the owning goroutine closes when its
+// request has returned.
+func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, before ...<-chan struct{}) ([]metrics.TopicMetrics, topicSections) {
 	sec := c.newSection(sectionTopics)
 	defer sec.stop()
 
 	// skipped builds the two later sections for a path that never reached them.
-	// Every return below is the same length and order, so a backend can always
-	// tell "not collected" from "collected, empty".
-	skipped := func() []*section {
+	// Every return below carries all three, so a backend can always tell "not
+	// collected" from "collected, empty".
+	skipped := func() topicSections {
 		lso, end := c.newSection(sectionTopicsLSO), c.newSection(sectionTopicsEnd)
 		lso.downgrade(metrics.SectionSkipped)
 		end.downgrade(metrics.SectionSkipped)
 		lso.stop()
 		end.stop()
-		return []*section{sec, lso, end}
+		return topicSections{starts: sec, lso: lso, end: end}
 	}
 
 	if tds == nil {
@@ -96,9 +102,11 @@ func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, co
 	starts, err := c.client.Admin.ListStartOffsets(ctx, names...)
 	startsOK := sec.requestPartial("ListStartOffsets", err, len(starts) > 0)
 
-	select {
-	case <-committed:
-	case <-ctx.Done():
+	for _, done := range before {
+		select {
+		case <-done:
+		case <-ctx.Done():
+		}
 	}
 
 	// Last stable offsets, strictly between the committed sample and the high
@@ -134,7 +142,16 @@ func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, co
 		))
 	}
 
-	return topics, []*section{sec, lsoSec, endSec}
+	return topics, topicSections{starts: sec, lso: lsoSec, end: endSec}
+}
+
+// topicSections are the three sections the topics phase emits, in the order
+// their offsets were sampled. They are named rather than a slice because Collect
+// splices the throughput window between the first two, where it was sampled.
+type topicSections struct {
+	starts *section
+	lso    *section
+	end    *section
 }
 
 // offsetSample is one List*Offsets result together with the section that owns

@@ -15,20 +15,30 @@ import (
 // Section names, part of the wire format via Section.Name and
 // CollectionError.Section.
 //
-// The three offset phases are split because each carries its own SampledAt and
+// The four offset phases are split because each carries its own SampledAt and
 // each is the denominator of a different quantity: an end-offset rate needs
-// topics_end.sampled_at, read_committed lag is (lso - committed), and
-// open-transaction backlog is (end - lso). log_dirs runs on a slower cadence
-// than the rest, so a backend must read its SampledAt rather than
-// Batch.CollectedAt.
+// topics_end.sampled_at, read_committed lag is (lso - committed),
+// open-transaction backlog is (end - lso), and the throughput window is
+// (end - window.offset) over (topics_end.sampled_at - window.timestamp_ms).
+// Several phases run on their own cadence or only when a trigger fires, so a
+// backend must read each SampledAt rather than Batch.CollectedAt.
+//
+// The order of the block is the canonical wire order Collect emits them in,
+// which is SAMPLE order; see finalize.
 const (
-	sectionCluster   = "cluster"
-	sectionTopics    = "topics"
-	sectionTopicsEnd = "topics_end"
-	sectionTopicsLSO = "topics_lso"
-	sectionGroups    = "groups"
-	sectionOffsets   = "offsets"
-	sectionLogDirs   = "log_dirs"
+	sectionCluster       = "cluster"
+	sectionTopics        = "topics"
+	sectionTopicsWindow  = "topics_window"
+	sectionTopicsLSO     = "topics_lso"
+	sectionTopicsEnd     = "topics_end"
+	sectionGroups        = "groups"
+	sectionOffsets       = "offsets"
+	sectionGroupStates   = "group_states"
+	sectionEpochProbes   = "epoch_probes"
+	sectionLogDirs       = "log_dirs"
+	sectionReassignments = "reassignments"
+	sectionAuthorizedOps = "authorized_operations"
+	sectionBrokerRPC     = "broker_rpc"
 )
 
 // Coarse error kinds carried in CollectionError.Kind. A backend routes on these
