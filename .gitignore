@@ -42,3 +42,6 @@ __debug_bin*
 
 # Stray root build artifact from `go build ./cmd/agent` with no -o
 /agent
+
+# Agent batch output (reproducible: `make run`, or a khaos scenario)
+*.jsonl
