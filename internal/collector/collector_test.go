@@ -126,7 +126,7 @@ var canonicalSections = []string{
 	sectionGroupStates, sectionEpochProbes,
 	sectionLogDirs, sectionReassignments,
 	sectionTopicConfigs, sectionBrokerConfigs, sectionShareGroups,
-	sectionAuthorizedOps, sectionBrokerRPC,
+	sectionBrokerRPC,
 }
 
 func TestFinalizeEmitsEverySectionEvenWhenSkipped(t *testing.T) {
@@ -198,7 +198,6 @@ func TestCollectEmitsEverySectionInOrderAgainstADeadCluster(t *testing.T) {
 		CollectLogDirs:          true,
 		CollectThroughputWindow: true,
 		ThroughputWindowWidth:   time.Minute,
-		CollectAuthorizedOps:    true,
 		CollectReassignments:    true,
 		CollectEpochProbes:      true,
 		CollectRPCStats:         true,

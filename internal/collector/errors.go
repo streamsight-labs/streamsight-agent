@@ -43,7 +43,6 @@ const (
 	sectionTopicConfigs  = "topic_configs"
 	sectionBrokerConfigs = "broker_configs"
 	sectionShareGroups   = "share_groups"
-	sectionAuthorizedOps = "authorized_operations"
 	sectionBrokerRPC     = "broker_rpc"
 )
 

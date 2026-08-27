@@ -68,7 +68,7 @@ flowchart TB
     end
 
     POST["after the end-offset sample<br/>log_dirs — every LOG_DIRS_EVERY cycles, opt-in<br/>reassignments — only on an observed URP<br/>epoch_probes — only on an unanswered epoch mismatch"]
-    JOIN["after every phase above has joined<br/>authorized_operations — one Metadata every AUTHORIZED_OPS_EVERY cycles<br/>group_states · broker_rpc — drain accumulators, no request"]
+    JOIN["after every phase above has joined<br/>group_states · broker_rpc — drain accumulators, no request"]
 
     MD --> chain
     MD --> WN
@@ -120,7 +120,7 @@ high-watermark call.
 
 The *wire* order of `sections[]` is different and also fixed: `cluster`, `topics`,
 `topics_window`, `topics_lso`, `topics_end`, `groups`, `offsets`, `group_states`,
-`epoch_probes`, `log_dirs`, `reassignments`, `authorized_operations`, `broker_rpc`. See
+`epoch_probes`, `log_dirs`, `reassignments`, `broker_rpc`. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the package map, the per-cycle sequence
 and the request budget.
 
@@ -229,7 +229,7 @@ configuration problems at once and exits non-zero — one restart per fix, not f
 | Variable | Default | Required when | Notes |
 |----------|---------|---------------|-------|
 | `EXPORT_MODE` | `http` if `EXPORT_ENDPOINT` is set, else `file` | — | `file` \| `http` \| `stdout`. Any other value is an error. |
-| `EXPORT_ENDPOINT` | — | `EXPORT_MODE=http` | Full URL that batches are POSTed to. |
+| `EXPORT_ENDPOINT` | `https://ingestion.streamsight.cloud/v1/batches` | http mode | Full URL that batches are POSTed to, **verbatim** — the agent appends no path, so the route is the receiver's decision. The default is applied only once http mode is chosen: assigned earlier it would flip an unconfigured agent out of file mode and into posting at production, because `EXPORT_MODE` is inferred as `http` iff an endpoint is set. |
 | `API_KEY` | — | `EXPORT_MODE=http` | Sent as `X-API-Key`. Never required in file/stdout mode. |
 | `EXPORT_FILE` | `./metrics.jsonl` (`/var/lib/streamsight/metrics.jsonl` in the image) | file mode | Parent directories are created. |
 | `EXPORT_FILE_MAX_MB` | `100` | file mode | `0` uses the 100MB default; negative disables rotation. |
@@ -245,7 +245,7 @@ configuration problems at once and exits non-zero — one restart per fix, not f
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `COLLECTION_INTERVAL` | `30s` | Must parse and be > 0. The first cycle runs immediately, not after one interval. |
+| `COLLECTION_INTERVAL` | `5s` | Must parse and be > 0. The first cycle runs immediately, not after one interval. |
 | `COLLECTION_TIMEOUT` | 80% of `COLLECTION_INTERVAL` (`24s`) | Per-cycle deadline. Exceeding the interval is a startup warning, not an error. |
 | `INCLUDE_INTERNAL_TOPICS` | `false` | Includes topics the broker flags internal (`__consumer_offsets`, `__transaction_state`) — the broker's own flag, not a name-prefix guess. |
 | `TOPIC_INCLUDE_REGEX` | `""` (all) | Compiled at startup; a bad pattern fails the process. |
@@ -256,7 +256,7 @@ configuration problems at once and exits non-zero — one restart per fix, not f
 | `COLLECT_LAST_STABLE_OFFSET` | `true` | Adds `partitions[].last_stable_offset` via `ListCommittedOffsets`, sampled between the committed offsets and the high watermarks. Leave it on: without it every `read_committed` consumer on a transactional topic reports permanent false lag. No new ACL; one extra `ListOffsets` fan-out per cycle. |
 | `COLLECT_CONSUMER_GROUPS` | `true` | Adds the KIP-848 fields — `groups[].group_epoch`, `assignment_epoch`, `assignor`, per-member `member_epoch` / `target_assignment` — via `ConsumerGroupDescribe`. It is the only way to see a new-protocol group at all: the classic describe returns one with empty join metadata and **no error**. Needs Kafka 4.0+; startup probes `ApiVersions` and disables it with a log line on an older cluster, so the cost there is one round trip, not a rejected request per cycle. No new ACL. |
 | `COLLECT_LOG_DIRS` | `false` | Adds the `log_dirs[]` section (per-broker, per-directory replica bytes and offline-disk detection) via `DescribeLogDirs`. No ACL beyond the `DESCRIBE` on `CLUSTER` already required, but the response is O(replicas) = partitions × replication factor, the largest payload the agent emits. Size `MAX_TOPICS`/`MAX_PARTITIONS_PER_TOPIC` before enabling it on a large cluster. |
-| `LOG_DIRS_EVERY` | `10` | Run the log-dirs phase every Nth cycle — five minutes at the default interval, because disks fill over hours. Must be >= 1 (`1` = every cycle); `0` is an error, not "every cycle". Ignored when `COLLECT_LOG_DIRS=false`. |
+| `LOG_DIRS_EVERY` | `24` | Run the log-dirs phase every Nth cycle — two minutes at the default interval, because disks fill over hours. Must be >= 1 (`1` = every cycle); `0` is an error, not "every cycle". Ignored when `COLLECT_LOG_DIRS=false`. |
 | `COLLECT_THROUGHPUT_WINDOW` | `false` | Adds `throughput_window` and `partitions[].window` via `ListOffsetsAfterMilli`: the produce rate measured **by the broker**, and the only rate input in the batch that survives an agent restart or a missed cycle. Off by default because it adds a `ListOffsets` fan-out — two on a mostly-silent cluster — to every cycle it runs on. Needs ListOffsets v1 (Kafka 0.10.1+); startup disables it below that, where the broker answers with no timestamp at all and no error. No new ACL. |
 | `THROUGHPUT_WINDOW` | `5m` | How far back the window reaches. It earns its cost only when it is **wider than `COLLECTION_INTERVAL`**: inside one interval a backend can already difference two batches. Must be > 0. |
 | `THROUGHPUT_WINDOW_EVERY` | `1` | Run the window phase every Nth cycle. Must be >= 1. |
@@ -265,13 +265,11 @@ configuration problems at once and exits non-zero — one restart per fix, not f
 | `COLLECT_LATEST_TIERED` | `true` | Additionally asks for `tiered.remote_end_offset` at `-5` (KIP-1005) — how far the archival tier is behind. **Ignored unless `COLLECT_TIERED_OFFSETS` is also set.** Gated apart from the local start because KIP-1005 landed five releases after KIP-405, so a 3.4–3.8 cluster serves one and not the other; one null inside a present `tiered` object is a real state, not an error. Needs Kafka 3.9+ (ListOffsets v9). No new ACL. |
 | `COLLECT_SHARE_GROUPS` | `false` | Adds the `share_groups[]` section via `ShareGroupDescribe` + `DescribeShareGroupOffsets` (KIP-932). Share groups are **not** consumer groups under another name: members share partitions and acknowledge individual records, so there is no committed offset per partition, no assignment to diff, and no lag in the committed-versus-end sense. They ship in their own section so no consumer-group derivation runs silently against a shape it does not model. Needs Kafka 4.0+. **Never exercised against a broker that can answer** — see `docs/ARCHITECTURE.md`. |
 | `COLLECT_CONFIGS` | `true` | Adds `topic_configs[]` and `broker_configs[]` via `DescribeConfigs`, over a fixed allowlist (10 topic keys, 11 broker keys). **The only collector that needs an ACL outside the three DESCRIBE grants** — `DESCRIBE_CONFIGS` on `TOPIC` and on `CLUSTER` — and it defaults **on** anyway, because what it collects is a correction rather than a feature. Without the grant these two sections report `unauthorized` and nothing else degrades; set `COLLECT_CONFIGS=false` to stop asking. `cleanup.policy` marks the compacted topics, where offset deltas are not record counts and consumer lag is overstated by an unknowable amount — without it the product reports a confident wrong number. `min.insync.replicas` separates "redundancy is reduced" from "every `acks=all` produce is failing right now", which the URP gauge alone cannot do. `offsets.retention.minutes` turns consumer overrun from a post-mortem into a prediction. Measured cost: **+517 B gzipped on the cycles it runs**, 8 B/batch amortised at the default cadence. Needs Kafka 1.1+ (DescribeConfigs v1, the version that carries `ConfigSource`); startup disables it below that rather than shipping every key as an indistinguishable default. |
-| `CONFIGS_EVERY` | `60` | Run the config phases every Nth cycle. The slowest cadence in the agent: configs change when a human changes them. Must be >= 1. |
-| `COLLECT_AUTHORIZED_OPS` | `true` | Adds `authorized_operations` on the cluster, each topic and each group (KIP-430), plus `principal` on the batch — the input to "grant `DESCRIBE_CONFIGS` on topic X to principal Y". One extra `Metadata` per sampled cycle; group bitfields ride the `DescribeGroups` the agent already issues. Needs Kafka 2.3+ (Metadata v8); startup disables it below that rather than shipping empty grants that read as broken ACLs. No new ACL. |
-| `AUTHORIZED_OPS_EVERY` | `10` | Run the ACL self-diagnostic every Nth cycle. Grants change on human timescales, and the request is O(partitions of the selected topics). Must be >= 1. |
+| `CONFIGS_EVERY` | `360` | Run the config phases every Nth cycle. The slowest cadence in the agent: configs change when a human changes them. Must be >= 1. |
 | `COLLECT_REASSIGNMENTS` | `true` | Adds `reassignments[]` via `ListPartitionReassignments` — "is this URP a failure or a planned move", the largest false-positive source in URP alerting. **The request is issued only when an under-replicated partition is observed**, so in a healthy cluster it costs one pass over a slice and the section reports `skipped`. Needs Kafka 2.4+. No new ACL. |
 | `COLLECT_EPOCH_PROBES` | `true` | Adds `epoch_probes[]` via `OffsetForLeaderEpoch`: positive proof of truncation (`committed_offset > end_offset` at the committed epoch), as opposed to the "high watermark went backwards" heuristic. **Fires only when a group's committed leader epoch disagrees with the partition's current one**, so it issues nothing in steady state. Needs Kafka 0.11+. No new ACL. |
 | `COLLECT_RPC_STATS` | `true` | Adds `agent.rpc` — per-broker latency histograms, bytes, connect failures and quota throttling, measured by hooks on the requests the agent already sends. Zero extra requests, zero ACL. Counters are per-window deltas reset every cycle: divide by `window_ms`, never by `COLLECTION_INTERVAL`. |
-| `COLLECT_GROUP_STATES` | `false` | Adds `group_states` — a fast `ListGroups` poll that observes the rebalance transitions a 30s cycle cannot see, drained onto the next batch. **The one phase whose cost is not paid per cycle**: one request *per broker* per tick, independent of `COLLECTION_INTERVAL`. Needs Kafka 2.6+ (ListGroups v4), below which the response carries no state at all. No new ACL. |
+| `COLLECT_GROUP_STATES` | `false` | Adds `group_states` — a fast `ListGroups` poll intended to observe rebalance transitions the collection cycle cannot see, drained onto the next batch. **MEASURED AND FOUND NOT TO WORK**: against a real rebalance storm it reported 2 transitions where member-set churn in `groups[]` found 31, because a rebalance completes well inside its 5s poll. Leave it off and detect rebalances from member-set churn instead; see `docs/ARCHITECTURE.md` Open item 2. **The one phase whose cost is not paid per cycle**: one request *per broker* per tick, independent of `COLLECTION_INTERVAL`. Needs Kafka 2.6+ (ListGroups v4), below which the response carries no state at all. No new ACL. |
 | `GROUP_STATE_POLL_INTERVAL` | `5s` | The fast tick, floored at 1s. It is the resolution of every dwell sample — a `PreparingRebalance` shorter than this is invisible — and the wire echoes it as `poll_interval_ms`. Must be > 0; a value at or above `COLLECTION_INTERVAL` warns, since it can then see nothing the cycle would have missed. |
 | `MAX_TRANSITIONS_PER_GROUP` | `256` | Caps the fast poll's per-group transition list and its dwell samples. The one cap whose default is not "unlimited": a rebalance storm is exactly when that list is longest. `transition_count` stays true when the list truncates. |
 
@@ -438,7 +436,6 @@ One batch per cycle, from the local test environment with default settings — s
     {"name": "epoch_probes",  "status": "skipped", "sampled_at": "2026-08-16T12:22:40.101499114Z", "duration_ms": 0},
     {"name": "log_dirs",      "status": "skipped", "sampled_at": "2026-08-16T12:22:40.101502110Z", "duration_ms": 0},
     {"name": "reassignments", "status": "skipped", "sampled_at": "2026-08-16T12:22:40.101503991Z", "duration_ms": 0},
-    {"name": "authorized_operations", "status": "ok", "sampled_at": "2026-08-16T12:22:40.101601233Z", "duration_ms": 3},
     {"name": "broker_rpc",    "status": "ok",      "sampled_at": "2026-08-16T12:22:40.104910447Z", "duration_ms": 0}
   ]
 }
@@ -490,7 +487,7 @@ never by `collected_at`.
 A section is a collection phase. **All thirteen ship on every cycle, always in this
 order**: `cluster`, `topics`, `topics_window`, `topics_lso`, `topics_end`, `groups`,
 `offsets`, `group_states`, `epoch_probes`, `log_dirs`, `reassignments`,
-`authorized_operations`, `broker_rpc`. A phase that did not run reports `skipped` rather
+`broker_rpc`. A phase that did not run reports `skipped` rather
 than vanishing, so a missing section is a protocol error, not a disabled feature. Status is
 one of:
 
@@ -645,7 +642,7 @@ you do), then grant the agent these three permissions and nothing else.
 | Resource | Operation | Used by |
 |----------|-----------|---------|
 | `CLUSTER` | `DESCRIBE` | `Metadata` (brokers, controller, cluster ID), `ListGroups`, `DescribeLogDirs` — the broker gates that whole handler on `DESCRIBE` of `CLUSTER`, so with `COLLECT_LOG_DIRS=true` this grant is load-bearing for a data section, not only for cluster metadata — and `ListPartitionReassignments` |
-| `TOPIC` | `DESCRIBE` | Topic and partition metadata, including the KIP-430 authorized-operations bitfields; `ListOffsets` for start offsets, end offsets, the `read_committed` last stable offset **and the by-timestamp throughput window** — all one API key, and the broker authorizes it before reading the isolation level or the timestamp; `OffsetForLeaderEpoch`; and the topics inside `OffsetFetch` |
+| `TOPIC` | `DESCRIBE` | Topic and partition metadata; `ListOffsets` for start offsets, end offsets, the `read_committed` last stable offset **and the by-timestamp throughput window** — all one API key, and the broker authorizes it before reading the isolation level or the timestamp; `OffsetForLeaderEpoch`; and the topics inside `OffsetFetch` |
 | `GROUP` | `DESCRIBE` | `DescribeGroups`, `ConsumerGroupDescribe` and `OffsetFetch` |
 | `TOPIC` | `DESCRIBE_CONFIGS` | `DescribeConfigs` for `topic_configs[]` — `cleanup.policy` is the only thing that identifies a compacted topic, where consumer lag is otherwise overstated by an unknowable amount |
 | `CLUSTER` | `DESCRIBE_CONFIGS` | `DescribeConfigs` for `broker_configs[]` — `offsets.retention.minutes` predicts group-offset expiry; per-broker drift on `min.insync.replicas` |

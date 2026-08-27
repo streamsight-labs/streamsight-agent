@@ -169,32 +169,10 @@ func TestBatchOmitsOptionalBlocksWhenNotCollected(t *testing.T) {
 	if !ok {
 		t.Fatalf("cluster = %v, want an object", m["cluster"])
 	}
-	for _, key := range []string{"capabilities", "authorized_operations"} {
+	for _, key := range []string{"capabilities"} {
 		if _, ok := cluster[key]; ok {
 			t.Errorf("cluster.%s present when not probed, want absent", key)
 		}
-	}
-}
-
-func TestAuthorizedOpsAbsentDiffersFromEmpty(t *testing.T) {
-	// An older broker reports no bitfield at all; a broker with a bare DESCRIBE
-	// grant can report one that permits nothing. "Cannot tell" and "denied" are
-	// opposite answers on the onboarding page, so they must not share a JSON.
-	unreported := marshalMap(t, TopicMetrics{Name: "orders"})
-	if _, ok := unreported["authorized_operations"]; ok {
-		t.Error("authorized_operations must be absent when the broker did not report it")
-	}
-
-	denied := marshalMap(t, TopicMetrics{Name: "orders", AuthorizedOperations: &AuthorizedOps{}})
-	ops, ok := denied["authorized_operations"].(map[string]any)
-	if !ok {
-		t.Fatalf("authorized_operations = %v, want an object", denied["authorized_operations"])
-	}
-	if v, ok := ops["operations"]; !ok || v != nil {
-		t.Errorf("operations = %v (present=%v), want an explicit null", v, ok)
-	}
-	if v, ok := ops["bitfield"]; !ok || v != nil {
-		t.Errorf("bitfield = %v (present=%v), want an explicit null", v, ok)
 	}
 }
 

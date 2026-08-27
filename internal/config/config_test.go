@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -42,8 +43,6 @@ var allKeys = []string{
 	"COLLECT_THROUGHPUT_WINDOW",
 	"THROUGHPUT_WINDOW",
 	"THROUGHPUT_WINDOW_EVERY",
-	"COLLECT_AUTHORIZED_OPS",
-	"AUTHORIZED_OPS_EVERY",
 	"COLLECT_REASSIGNMENTS",
 	"COLLECT_EPOCH_PROBES",
 	"COLLECT_RPC_STATS",
@@ -168,9 +167,10 @@ func TestLoadRequiredFieldMatrix(t *testing.T) {
 			wantErr: "API_KEY is required when EXPORT_MODE=http",
 		},
 		{
-			name:    "http mode needs endpoint",
-			env:     base(map[string]string{"EXPORT_MODE": "http", "API_KEY": "k"}),
-			wantErr: "EXPORT_ENDPOINT is required when EXPORT_MODE=http",
+			// No longer an error: http mode defaults the endpoint. The API key
+			// stays required, so an agent cannot post anywhere without one.
+			name: "http mode defaults the endpoint",
+			env:  base(map[string]string{"EXPORT_MODE": "http", "API_KEY": "k"}),
 		},
 		{
 			name: "http mode fully specified",
@@ -218,8 +218,8 @@ func TestLoadIntervalValidation(t *testing.T) {
 		{
 			name:        "defaults",
 			env:         base(nil),
-			wantEvery:   30 * time.Second,
-			wantTimeout: 24 * time.Second,
+			wantEvery:   DefaultInterval,
+			wantTimeout: DefaultInterval * collectionTimeoutRatio / 100,
 		},
 		{
 			name:        "timeout derives from interval",
@@ -495,8 +495,6 @@ func TestLoadDefaults(t *testing.T) {
 		{"CollectThroughputWindow", cfg.CollectThroughputWindow, DefaultCollectThroughputWindow},
 		{"ThroughputWindow", cfg.ThroughputWindow, DefaultThroughputWindow},
 		{"ThroughputWindowEvery", cfg.ThroughputWindowEvery, DefaultThroughputWindowEvery},
-		{"CollectAuthorizedOps", cfg.CollectAuthorizedOps, DefaultCollectAuthorizedOps},
-		{"AuthorizedOpsEvery", cfg.AuthorizedOpsEvery, DefaultAuthorizedOpsEvery},
 		{"CollectReassignments", cfg.CollectReassignments, DefaultCollectReassignments},
 		{"CollectEpochProbes", cfg.CollectEpochProbes, DefaultCollectEpochProbes},
 		{"CollectRPCStats", cfg.CollectRPCStats, DefaultCollectRPCStats},
@@ -756,8 +754,6 @@ func TestLoadOptionalCollectors(t *testing.T) {
 			"COLLECT_THROUGHPUT_WINDOW": "true",
 			"THROUGHPUT_WINDOW":         "10m",
 			"THROUGHPUT_WINDOW_EVERY":   "4",
-			"COLLECT_AUTHORIZED_OPS":    "false",
-			"AUTHORIZED_OPS_EVERY":      "30",
 			"COLLECT_REASSIGNMENTS":     "false",
 			"COLLECT_EPOCH_PROBES":      "false",
 			"COLLECT_RPC_STATS":         "false",
@@ -771,9 +767,6 @@ func TestLoadOptionalCollectors(t *testing.T) {
 		}
 		if !cfg.CollectThroughputWindow || cfg.ThroughputWindow != 10*time.Minute || cfg.ThroughputWindowEvery != 4 {
 			t.Errorf("throughput window = %t/%s/%d", cfg.CollectThroughputWindow, cfg.ThroughputWindow, cfg.ThroughputWindowEvery)
-		}
-		if cfg.CollectAuthorizedOps || cfg.AuthorizedOpsEvery != 30 {
-			t.Errorf("authorized ops = %t/%d", cfg.CollectAuthorizedOps, cfg.AuthorizedOpsEvery)
 		}
 		if cfg.CollectReassignments || cfg.CollectEpochProbes || cfg.CollectRPCStats {
 			t.Errorf("triggered phases = %t/%t/%t", cfg.CollectReassignments, cfg.CollectEpochProbes, cfg.CollectRPCStats)
@@ -789,7 +782,6 @@ func TestLoadOptionalCollectors(t *testing.T) {
 		for key, value := range map[string]string{
 			"THROUGHPUT_WINDOW":         "0s",
 			"THROUGHPUT_WINDOW_EVERY":   "0",
-			"AUTHORIZED_OPS_EVERY":      "0",
 			"GROUP_STATE_POLL_INTERVAL": "-1s",
 			"MAX_TRANSITIONS_PER_GROUP": "-1",
 		} {
@@ -837,7 +829,7 @@ func TestCollectorWarnings(t *testing.T) {
 	// A window narrower than the interval is legal and useless: the backend can
 	// difference two consecutive batches over that span for free.
 	t.Run("a throughput window narrower than the interval warns", func(t *testing.T) {
-		setEnv(t, base(map[string]string{"COLLECT_THROUGHPUT_WINDOW": "true", "THROUGHPUT_WINDOW": "10s"}))
+		setEnv(t, base(map[string]string{"COLLECT_THROUGHPUT_WINDOW": "true", "THROUGHPUT_WINDOW": "1s"}))
 		cfg, err := Load()
 		if err != nil {
 			t.Fatalf("Load: %v", err)
@@ -903,11 +895,10 @@ func TestRedactedShowsTheCadenceOnlyWhenItApplies(t *testing.T) {
 		t.Errorf("redacted output prints a cadence for a disabled phase: %s", s)
 	}
 	for _, want := range []string{
-		"collect_throughput_window=false", "collect_authorized_ops=true",
+		"collect_throughput_window=false",
 		"collect_reassignments=true", "collect_epoch_probes=true",
 		"collect_rpc_stats=true", "collect_group_states=false",
 		// On by default, so its cadence IS in force and must be printed.
-		"authorized_ops_every=10",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("redacted output missing %q: %s", want, s)
@@ -925,7 +916,7 @@ func TestRedactedShowsTheCadenceOnlyWhenItApplies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !strings.Contains(cfg.Redacted(), "log_dirs_every=10") {
+	if !strings.Contains(cfg.Redacted(), fmt.Sprintf("log_dirs_every=%d", DefaultLogDirsEvery)) {
 		t.Errorf("redacted output missing the cadence in force: %s", cfg.Redacted())
 	}
 }
@@ -991,5 +982,32 @@ func TestRedactedShowsOnlySetCaps(t *testing.T) {
 	}
 	if strings.Contains(s, "max_topics=") {
 		t.Errorf("redacted output prints an unlimited cap: %s", s)
+	}
+}
+
+// The endpoint default is applied inside http mode, never before it. Assigned
+// earlier it would make ExportEndpoint always non-empty, and EXPORT_MODE is
+// inferred as http IFF an endpoint is set -- so every agent started with no
+// configuration at all would silently begin POSTing at production.
+func TestEndpointDefaultCannotFlipAnUnconfiguredAgentIntoHTTPMode(t *testing.T) {
+	setEnv(t, map[string]string{"KAFKA_BROKERS": "localhost:9092"})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ExportMode != ExportModeFile {
+		t.Fatalf("ExportMode = %q with no export config, want %q", cfg.ExportMode, ExportModeFile)
+	}
+	if cfg.ExportEndpoint != "" {
+		t.Errorf("ExportEndpoint = %q in file mode, want empty", cfg.ExportEndpoint)
+	}
+
+	setEnv(t, map[string]string{"KAFKA_BROKERS": "localhost:9092", "EXPORT_MODE": "http", "API_KEY": "k"})
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ExportEndpoint != DefaultExportEndpoint {
+		t.Errorf("ExportEndpoint = %q, want the default %q", cfg.ExportEndpoint, DefaultExportEndpoint)
 	}
 }

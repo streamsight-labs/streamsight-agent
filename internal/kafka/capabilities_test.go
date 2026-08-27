@@ -93,11 +93,6 @@ func TestCapabilitiesTakeTheMinimumNotTheMaximum(t *testing.T) {
 			want:    (*Capabilities).SupportsLogDirTotalBytes,
 		},
 		{
-			name:    "topic authorized operations: one broker below Metadata v8",
-			brokers: []brokerKeys{modernBroker(1, map[int16]int16{metadataKey: 7})},
-			want:    (*Capabilities).SupportsTopicAuthorizedOperations,
-		},
-		{
 			name:    "offset for leader epoch: absent on one broker",
 			brokers: []brokerKeys{modernBroker(1), withoutKey(2, offsetForLeaderEpochKey)},
 			want:    (*Capabilities).SupportsOffsetForLeaderEpoch,
@@ -148,7 +143,6 @@ func TestAllCoversEveryCapability(t *testing.T) {
 		CapabilityListOffsetsIsolation,
 		CapabilityListOffsetsAfterMilli,
 		CapabilityLogDirTotalBytes,
-		CapabilityTopicAuthorizedOperations,
 		CapabilityOffsetForLeaderEpoch,
 		CapabilityListPartitionReassignments,
 	}
@@ -311,9 +305,6 @@ func TestWireCarriesTheEvidenceNotJustTheVerdict(t *testing.T) {
 	}
 	// A capability nothing probed is ABSENT, not false: false is a claim about
 	// the cluster, and no request was made to back it.
-	if _, asked := wire.Features[metrics.CapabilityClusterAuthorizedOps]; asked {
-		t.Error("cluster_authorized_operations is reported without being probed")
-	}
 
 	if len(wire.Brokers) != 2 {
 		t.Fatalf("brokers = %+v, want one row per broker", wire.Brokers)

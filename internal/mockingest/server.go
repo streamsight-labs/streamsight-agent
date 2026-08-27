@@ -67,7 +67,7 @@ var (
 		"topics", "topics_window", "topics_lso", "topics_end",
 		"groups", "offsets",
 		"group_states", "epoch_probes",
-		"log_dirs", "reassignments", "authorized_operations", "broker_rpc",
+		"log_dirs", "reassignments", "broker_rpc",
 	}
 	DefaultOptionalSections = []string{}
 )

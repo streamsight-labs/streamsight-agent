@@ -38,8 +38,17 @@ const (
 	DefaultExportBaseDelay  = time.Second
 	DefaultExportTimeout    = 10 * time.Second
 	DefaultExportGzip       = true
-	DefaultInterval         = 30 * time.Second
-	DefaultLogLevel         = "info"
+	// DefaultExportEndpoint is the hosted ingest path. Self-hosted and on-prem
+	// deployments override it; the agent POSTs to this URL verbatim and appends
+	// no path of its own, so the route is a decision on the receiving side.
+	DefaultExportEndpoint = "https://ingestion.streamsight.cloud/v1/batches"
+
+	// DefaultInterval is 5s because that is the polling cadence the product
+	// sells on every plan. It used to be 30s, and every _EVERY default below was
+	// sized against that: each is a CYCLE COUNT, so its wall-clock meaning moves
+	// when this does. They were all re-derived when this changed.
+	DefaultInterval = 5 * time.Second
+	DefaultLogLevel = "info"
 
 	// DefaultCollectLSO is ON because it is a correctness fix, not a feature:
 	// end_offset is the high watermark, so without the last stable offset every
@@ -62,7 +71,14 @@ const (
 	// DefaultLogDirsEvery samples log dirs once per ten cycles (five minutes at
 	// the default interval). Disks fill over hours, so an O(replicas) response
 	// every 30 seconds buys nothing.
-	DefaultLogDirsEvery = 10
+	// DefaultLogDirsEvery samples once every two minutes at the 5s interval.
+	// MEASURED: the section is ~70 B per replica, so on a 350-partition RF-3
+	// cluster it is ~73 KB against a ~34 KB batch -- it TRIPLES the payload on
+	// the cycles it runs. Disks fill over hours, so 720 samples a day is ample
+	// for a days-to-full forecast, and it keeps the largest section off 96% of
+	// batches. Offline-disk detection does not depend on this cadence: a dead
+	// replica also shows in partitions[].offline_replicas every cycle.
+	DefaultLogDirsEvery = 24
 
 	// DefaultCollectThroughputWindow is OFF: the phase adds a ListOffsets
 	// fan-out — two on a mostly-silent cluster, because the broker re-lists every
@@ -79,13 +95,6 @@ const (
 	// a rate on every batch. The knob exists for wide clusters.
 	DefaultThroughputWindowEvery = 1
 
-	// DefaultCollectAuthorizedOps is ON: it turns "section: unauthorized" into
-	// "grant DESCRIBE_CONFIGS on topic X to principal Y", and it needs no ACL
-	// beyond the DESCRIBE the agent already requires.
-	DefaultCollectAuthorizedOps = true
-	// DefaultAuthorizedOpsEvery samples once per ten cycles. Grants change on
-	// human timescales, while the request is O(partitions) of the selected topics.
-	DefaultAuthorizedOpsEvery = 10
 	// DefaultCollectConfigs is ON, and it is the only collector that needs an
 	// ACL outside DESCRIBE on CLUSTER/TOPIC/GROUP. It defaults on anyway,
 	// because what it collects is a CORRECTION rather than a feature.
@@ -104,7 +113,9 @@ const (
 	DefaultCollectConfigs = true
 	// DefaultConfigsEvery samples once per sixty cycles, the slowest cadence in
 	// the agent. Configs change when a human changes them.
-	DefaultConfigsEvery = 60
+	// DefaultConfigsEvery samples once every thirty minutes at the 5s interval,
+	// the slowest cadence in the agent. Configs change when a human changes them.
+	DefaultConfigsEvery = 360
 
 	// DefaultCollectMaxTimestamp is ON. One extra ListOffsets fan-out, no new
 	// ACL, and it replaces an inference with a measurement: topic liveness is
@@ -254,8 +265,6 @@ type Config struct {
 	CollectThroughputWindow bool
 	ThroughputWindow        time.Duration
 	ThroughputWindowEvery   int
-	CollectAuthorizedOps    bool
-	AuthorizedOpsEvery      int
 	CollectConfigs          bool
 	ConfigsEvery            int
 	CollectMaxTimestamp     bool
@@ -329,8 +338,13 @@ func Load() (*Config, error) {
 	switch c.ExportMode {
 	case ExportModeFile, ExportModeStdout:
 	case ExportModeHTTP:
+		// Defaulted here rather than at the read above, and the placement is the
+		// whole point: EXPORT_MODE is inferred as http IFF an endpoint is set, so
+		// a default assigned earlier would flip every unconfigured agent from
+		// file mode into posting at production. Inside this case the operator has
+		// already chosen http, either explicitly or by setting an endpoint.
 		if c.ExportEndpoint == "" {
-			p.errf("EXPORT_ENDPOINT is required when EXPORT_MODE=http")
+			c.ExportEndpoint = DefaultExportEndpoint
 		}
 		if c.APIKey == "" {
 			p.errf("API_KEY is required when EXPORT_MODE=http")
@@ -417,11 +431,6 @@ func Load() (*Config, error) {
 		p.errf("THROUGHPUT_WINDOW_EVERY must be >= 1 (1 = every cycle), got %d", c.ThroughputWindowEvery)
 	}
 
-	c.CollectAuthorizedOps = p.boolean("COLLECT_AUTHORIZED_OPS", DefaultCollectAuthorizedOps)
-	c.AuthorizedOpsEvery = p.integer("AUTHORIZED_OPS_EVERY", DefaultAuthorizedOpsEvery)
-	if c.AuthorizedOpsEvery < 1 {
-		p.errf("AUTHORIZED_OPS_EVERY must be >= 1 (1 = every cycle), got %d", c.AuthorizedOpsEvery)
-	}
 	c.CollectMaxTimestamp = p.boolean("COLLECT_MAX_TIMESTAMP", DefaultCollectMaxTimestamp)
 	c.CollectTieredOffsets = p.boolean("COLLECT_TIERED_OFFSETS", DefaultCollectTieredOffsets)
 	c.CollectLatestTiered = p.boolean("COLLECT_LATEST_TIERED", DefaultCollectLatestTiered)
@@ -570,10 +579,6 @@ func (c *Config) Warnings() []string {
 		w = append(w, fmt.Sprintf("THROUGHPUT_WINDOW (%s) is narrower than COLLECTION_INTERVAL (%s): a backend can already difference two batches over that span, so the extra ListOffsets fan-out buys nothing",
 			c.ThroughputWindow, c.CollectionInterval))
 	}
-	if c.CollectAuthorizedOps && c.AuthorizedOpsEvery == 1 {
-		w = append(w, fmt.Sprintf("COLLECT_AUTHORIZED_OPS=true with AUTHORIZED_OPS_EVERY=1 adds a Metadata request O(partitions of the selected topics) to every %s cycle, for grants that change on human timescales", c.CollectionInterval))
-	}
-
 	if c.CollectGroupStates {
 		// The only phase whose cost is not paid per cycle: it is a second ticker,
 		// so the request count scales with brokers × ticks, not with the batch.
@@ -643,10 +648,6 @@ func (c *Config) Redacted() string {
 	fmt.Fprintf(&b, " collect_throughput_window=%t", c.CollectThroughputWindow)
 	if c.CollectThroughputWindow {
 		fmt.Fprintf(&b, " throughput_window=%s throughput_window_every=%d", c.ThroughputWindow, c.ThroughputWindowEvery)
-	}
-	fmt.Fprintf(&b, " collect_authorized_ops=%t", c.CollectAuthorizedOps)
-	if c.CollectAuthorizedOps {
-		fmt.Fprintf(&b, " authorized_ops_every=%d", c.AuthorizedOpsEvery)
 	}
 	fmt.Fprintf(&b, " collect_reassignments=%t collect_epoch_probes=%t collect_rpc_stats=%t",
 		c.CollectReassignments, c.CollectEpochProbes, c.CollectRPCStats)

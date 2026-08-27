@@ -111,7 +111,6 @@ func validBatch(seq uint64) *metrics.Batch {
 			{Name: "epoch_probes", Status: metrics.SectionSkipped, SampledAt: ms(11), DurationMs: 0},
 			{Name: "log_dirs", Status: metrics.SectionSkipped, SampledAt: ms(11), DurationMs: 0},
 			{Name: "reassignments", Status: metrics.SectionSkipped, SampledAt: ms(11), DurationMs: 0},
-			{Name: "authorized_operations", Status: metrics.SectionOK, SampledAt: ms(12), DurationMs: 1},
 			{Name: "broker_rpc", Status: metrics.SectionOK, SampledAt: ms(13), DurationMs: 0},
 		},
 	}

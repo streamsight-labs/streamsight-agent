@@ -52,9 +52,6 @@ broker_configs[].configs[].source string omitempty
 broker_configs[].configs[].value *string nullable
 broker_configs[].error_code int16 omitempty
 cluster metrics.ClusterMetrics
-cluster.authorized_operations *metrics.AuthorizedOps nullable omitempty
-cluster.authorized_operations.bitfield *int32 nullable
-cluster.authorized_operations.operations []string
 cluster.broker_count int
 cluster.brokers []metrics.Broker
 cluster.brokers[].host string
@@ -122,9 +119,6 @@ group_states.window_start time.Time
 groups []metrics.GroupMetrics
 groups[].assignment_epoch *int32 nullable omitempty
 groups[].assignor string omitempty
-groups[].authorized_operations *metrics.AuthorizedOps nullable omitempty
-groups[].authorized_operations.bitfield *int32 nullable
-groups[].authorized_operations.operations []string
 groups[].coordinator int32
 groups[].error_code int16 omitempty
 groups[].generation int32
@@ -205,9 +199,6 @@ sections[].truncated bool omitempty
 share_groups []metrics.ShareGroup omitempty
 share_groups[].assignment_epoch int32
 share_groups[].assignor string omitempty
-share_groups[].authorized_operations *metrics.AuthorizedOps nullable omitempty
-share_groups[].authorized_operations.bitfield *int32 nullable
-share_groups[].authorized_operations.operations []string
 share_groups[].coordinator int32
 share_groups[].error_code int16 omitempty
 share_groups[].group_epoch int32
@@ -242,9 +233,6 @@ topic_configs[].configs[].value *string nullable
 topic_configs[].error_code int16 omitempty
 topic_configs[].topic string
 topics []metrics.TopicMetrics
-topics[].authorized_operations *metrics.AuthorizedOps nullable omitempty
-topics[].authorized_operations.bitfield *int32 nullable
-topics[].authorized_operations.operations []string
 topics[].error_code int16 omitempty
 topics[].id string omitempty
 topics[].internal bool

@@ -374,10 +374,6 @@ type ClusterMetrics struct {
 	// cadence, like log_dirs — NOT that the cluster has no capabilities. Carry the
 	// last non-null forward per cluster.id.
 	Capabilities *ClusterCapabilities `json:"capabilities,omitempty"`
-
-	// AuthorizedOperations is the principal's permissions on the CLUSTER
-	// resource. Nil and empty mean different things: see AuthorizedOps.
-	AuthorizedOperations *AuthorizedOps `json:"authorized_operations,omitempty"`
 }
 
 // Capability names carried in ClusterCapabilities.Features. Each is a wire
@@ -401,14 +397,6 @@ const (
 	// CapabilityLogDirsVolumeBytes is DescribeLogDirs v4+ (KIP-827), which added
 	// TotalBytes and UsableBytes.
 	CapabilityLogDirsVolumeBytes = "log_dirs_volume_bytes"
-	// CapabilityTopicAuthorizedOps is Metadata v8+.
-	CapabilityTopicAuthorizedOps = "topic_authorized_operations"
-	// CapabilityClusterAuthorizedOps is Metadata v8-v10 or DescribeCluster: the
-	// cluster bitfield was REMOVED from Metadata in v11, so on a modern broker
-	// this is false unless DescribeCluster is reachable.
-	CapabilityClusterAuthorizedOps = "cluster_authorized_operations"
-	// CapabilityGroupAuthorizedOps is DescribeGroups v3+.
-	CapabilityGroupAuthorizedOps = "group_authorized_operations"
 	// CapabilityOffsetForLeaderEpoch is the OffsetForLeaderEpoch key.
 	CapabilityOffsetForLeaderEpoch = "offset_for_leader_epoch"
 	// CapabilityListOffsetsAfterMilli is ListOffsets v1+, the first version that
@@ -473,33 +461,6 @@ type BrokerCapability struct {
 	APIMaxVersions map[string]int16 `json:"api_max_versions"`
 }
 
-// AuthorizedOps is the broker's answer to "what may this principal do to this
-// resource", the input to "grant X on Y to principal Z".
-//
-// The nil/empty distinction is the whole point and must survive: a nil
-// *AuthorizedOps means the broker did not report the bitfield (too old, or the
-// field was omitted), while a non-nil value with an empty Operations means the
-// broker reported that NOTHING is permitted. A consumer must not render an
-// absent bitfield as a missing grant, and must not render an empty one as
-// "unknown".
-//
-// Note that kadm's DecodeACLOperations collapses both cases to a nil slice, so
-// the collector decides emission from the capability flag, not from the decoded
-// length.
-type AuthorizedOps struct {
-	// Bitfield is the raw int32 the broker sent. The broker's "omitted" sentinel
-	// (math.MinInt32) must be shipped as a nil *AuthorizedOps, never as a number.
-	// Null here means the value reached the agent already decoded and the raw
-	// bitfield was lost; Operations is still authoritative.
-	Bitfield *int32 `json:"bitfield"`
-	// Operations are Kafka ACL operation names ("READ", "DESCRIBE",
-	// "DESCRIBE_CONFIGS"), sorted. This is deliberately NOT an enum on the wire:
-	// Kafka adds operations, and an unknown name must be forwarded, not dropped.
-	// Bits that decode to no known operation are omitted, so Operations can be
-	// shorter than Bitfield's population count.
-	Operations []string `json:"operations"`
-}
-
 // Broker is one node. Rack is nil when the broker declares none, which is not
 // the same as an empty rack name.
 type Broker struct {
@@ -526,11 +487,6 @@ type TopicMetrics struct {
 	ReplicationFactor int         `json:"replication_factor"`
 	Partitions        []Partition `json:"partitions"`
 	ErrorCode         int16       `json:"error_code,omitempty"`
-
-	// AuthorizedOperations is the principal's permissions on this topic. A topic
-	// visible in metadata with DESCRIBE but nothing else is exactly the case a
-	// backend renders as "grant DESCRIBE_CONFIGS on topic X to Y".
-	AuthorizedOperations *AuthorizedOps `json:"authorized_operations,omitempty"`
 }
 
 // Partition is one partition's placement and its three offset marks. The
@@ -862,10 +818,6 @@ type GroupMetrics struct {
 	Members     []GroupMember `json:"members"`
 	ErrorCode   int16         `json:"error_code,omitempty"`
 
-	// AuthorizedOperations is the principal's permissions on this group, from
-	// DescribeGroups v3+. Nil and empty differ: see AuthorizedOps.
-	AuthorizedOperations *AuthorizedOps `json:"authorized_operations,omitempty"`
-
 	// The fields below come from ConsumerGroupDescribe (KIP-848) and are null on
 	// a classic-protocol group, on a broker older than Kafka 4.0, and when
 	// COLLECT_CONSUMER_GROUPS is off. Null means "not applicable or not known",
@@ -1077,8 +1029,6 @@ type ShareGroup struct {
 	// Empty both when the offsets phase did not run and when the group holds
 	// none -- read the share_groups section status, never len().
 	StartOffsets []ShareGroupOffset `json:"start_offsets,omitempty"`
-
-	AuthorizedOperations *AuthorizedOps `json:"authorized_operations,omitempty"`
 }
 
 // ShareGroupMember is one member of a share group. Assignment here is which

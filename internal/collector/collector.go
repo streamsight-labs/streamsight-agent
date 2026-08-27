@@ -71,16 +71,6 @@ type Options struct {
 	// means every cycle.
 	ThroughputWindowEvery int
 
-	// CollectAuthorizedOps issues one extra Metadata carrying the KIP-430
-	// bitfields, so a backend can turn "section: unauthorized" into "grant
-	// DESCRIBE_CONFIGS on topic X to principal Y". It needs no new ACL and
-	// defaults on.
-	CollectAuthorizedOps bool
-	// AuthorizedOpsEvery runs the ACL self-diagnostic on every Nth cycle; below 1
-	// means every cycle. Grants change on human timescales, and the request is
-	// O(partitions) of the selected topics.
-	AuthorizedOpsEvery int
-
 	// CollectMaxTimestamp adds partitions[].max_timestamp via ListOffsets at
 	// timestamp -3 (KIP-734, Kafka 3.0+). One extra ListOffsets fan-out, no new
 	// ACL: it is the same API key the four offset phases already use, and the
@@ -280,11 +270,10 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		listErr       error
 		listStart     time.Time
 
-		topics    []metrics.TopicMetrics
-		groups    []metrics.GroupMetrics
-		described kadm.DescribedGroups
-		offsets   []metrics.ConsumerOffset
-		logDirs   []metrics.LogDir
+		topics  []metrics.TopicMetrics
+		groups  []metrics.GroupMetrics
+		offsets []metrics.ConsumerOffset
+		logDirs []metrics.LogDir
 
 		window        *metrics.ThroughputWindow
 		windowOffsets *windowSample
@@ -308,7 +297,6 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 	var (
 		runWindow = runsThisCycle(c.opts.CollectThroughputWindow, c.opts.ThroughputWindowEvery, n)
 		runDirs   = runsThisCycle(c.opts.CollectLogDirs, c.opts.LogDirsEvery, n)
-		runAuth   = runsThisCycle(c.opts.CollectAuthorizedOps, c.opts.AuthorizedOpsEvery, n)
 		runCfg    = runsThisCycle(c.opts.CollectConfigs, c.opts.ConfigsEvery, n)
 	)
 
@@ -332,7 +320,7 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 	go func() {
 		defer wg.Done()
 		<-groupsListed
-		groups, described, groupsSec = c.collectGroups(ctx, groupIDs, groupTypes, groupsDropped, listErr, listStart)
+		groups, groupsSec = c.collectGroups(ctx, groupIDs, groupTypes, groupsDropped, listErr, listStart)
 	}()
 
 	// Committed offsets. Must complete before either ceiling — the last stable
@@ -436,16 +424,13 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		ShareGroups:      shareGroups,
 	}
 
-	// Post-passes over the finished batch. The first stamps entries the topics
-	// and groups phases produced; the other two drain accumulators.
-	authSec := c.collectAuthorizedOps(ctx, batch, described, runAuth)
+	// Post-passes over the finished batch. Both drain accumulators and issue no
+	// request of their own.
 	var statesSec, rpcSec *section
 	batch.GroupStates, statesSec = c.collectGroupStates(c.stateWatch)
 	batch.Agent.RPC, rpcSec = c.collectRPC(c.opts.CollectRPCStats)
 
-	// Stamped after the post-passes, not at the join: the authorized-operations
-	// phase issues a request of its own, and a collection_ms that excluded it
-	// would understate the cycle on exactly the cycles it runs.
+	// Stamped after the post-passes so collection_ms covers the whole cycle.
 	batch.CollectionMs = time.Since(start).Milliseconds()
 
 	secs := []*section{
@@ -454,7 +439,7 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		topicSecs.maxTS, topicSecs.local, topicSecs.remote,
 		groupsSec, offsetsSec,
 		statesSec, epochSec,
-		logDirsSec, reassignSec, topicCfgSec, brokerCfgSec, shareSec, authSec, rpcSec,
+		logDirsSec, reassignSec, topicCfgSec, brokerCfgSec, shareSec, rpcSec,
 	}
 	c.finalize(batch, secs, groupsDropped)
 

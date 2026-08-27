@@ -56,9 +56,6 @@ const (
 
 	// metadataKey is the Metadata API key.
 	metadataKey = 3
-	// metadataAuthorizedOpsVersion is the first Metadata version with
-	// IncludeTopicAuthorizedOperations (Kafka 2.3).
-	metadataAuthorizedOpsVersion = 8
 
 	// describeLogDirsKey is the DescribeLogDirs API key.
 	describeLogDirsKey = 35
@@ -102,9 +99,6 @@ const (
 	// CapabilityLogDirTotalBytes is DescribeLogDirs reporting dir capacity
 	// (KIP-827), the denominator under log-dir growth.
 	CapabilityLogDirTotalBytes = "log_dir_total_bytes"
-	// CapabilityTopicAuthorizedOperations is Metadata returning per-topic
-	// authorized operations, the ACL self-diagnostic.
-	CapabilityTopicAuthorizedOperations = "topic_authorized_operations"
 	// CapabilityOffsetForLeaderEpoch is OffsetForLeaderEpoch, the positive
 	// proof of truncation.
 	CapabilityOffsetForLeaderEpoch = "offset_for_leader_epoch"
@@ -269,12 +263,6 @@ func (c *Capabilities) SupportsLogDirTotalBytes() bool {
 	return c.atLeast(describeLogDirsKey, describeLogDirsTotalBytesVersion)
 }
 
-// SupportsTopicAuthorizedOperations reports whether every broker can return
-// per-topic authorized operations in a Metadata response (Kafka 2.3+).
-func (c *Capabilities) SupportsTopicAuthorizedOperations() bool {
-	return c.atLeast(metadataKey, metadataAuthorizedOpsVersion)
-}
-
 // SupportsOffsetForLeaderEpoch reports whether every broker serves
 // OffsetForLeaderEpoch (Kafka 0.11+).
 func (c *Capabilities) SupportsOffsetForLeaderEpoch() bool {
@@ -340,7 +328,6 @@ func (c *Capabilities) All() map[string]bool {
 		CapabilityListOffsetsIsolation:       c.SupportsListOffsetsIsolation(),
 		CapabilityListOffsetsAfterMilli:      c.SupportsListOffsetsAfterMilli(),
 		CapabilityLogDirTotalBytes:           c.SupportsLogDirTotalBytes(),
-		CapabilityTopicAuthorizedOperations:  c.SupportsTopicAuthorizedOperations(),
 		CapabilityOffsetForLeaderEpoch:       c.SupportsOffsetForLeaderEpoch(),
 		CapabilityListPartitionReassignments: c.SupportsListPartitionReassignments(),
 	}
@@ -377,7 +364,6 @@ func (c *Capabilities) Wire() *metrics.ClusterCapabilities {
 			metrics.CapabilityGroupStateFilter:      c.SupportsGroupStatesFilter(),
 			metrics.CapabilityConsumerGroupDescribe: c.SupportsConsumerGroupDescribe(),
 			metrics.CapabilityLogDirsVolumeBytes:    c.SupportsLogDirTotalBytes(),
-			metrics.CapabilityTopicAuthorizedOps:    c.SupportsTopicAuthorizedOperations(),
 			metrics.CapabilityOffsetForLeaderEpoch:  c.SupportsOffsetForLeaderEpoch(),
 			metrics.CapabilityReassignments:         c.SupportsListPartitionReassignments(),
 		},

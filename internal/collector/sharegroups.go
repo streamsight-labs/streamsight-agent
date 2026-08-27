@@ -113,7 +113,6 @@ func buildShareGroups(described kadm.DescribedShareGroups, offsets kadm.Describe
 			sg.ErrorCode = errorCode(g.Err)
 			sec.recordGroup(apiShareGroupDescribe, g.GroupID, g.Err)
 		}
-		sg.AuthorizedOperations = decodedAuthorizedOps(g.AuthorizedOperations, g.Err == nil)
 
 		sg.Members = make([]metrics.ShareGroupMember, 0, len(g.Members))
 		for _, m := range g.Members {
