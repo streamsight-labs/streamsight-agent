@@ -225,7 +225,7 @@ func TestPartitionCountIsPreTruncation(t *testing.T) {
 	sec := newSection(sectionTopics)
 	starts, lsos, ends := noOffsets()
 
-	tm := c.buildTopic(topicWithPartitions(5), sec, starts, lsos, ends)
+	tm := c.buildTopic(topicWithPartitions(5), sec, starts, lsos, ends, offsetSample{}, offsetSample{}, offsetSample{})
 
 	if tm.PartitionCount != 5 {
 		t.Errorf("PartitionCount = %d, want the true pre-truncation 5", tm.PartitionCount)
@@ -249,7 +249,7 @@ func TestReplicationFactorIgnoresPartitionTruncation(t *testing.T) {
 	sec := newSection(sectionTopics)
 	starts, lsos, ends := noOffsets()
 
-	tm := c.buildTopic(topicWithPartitions(5), sec, starts, lsos, ends)
+	tm := c.buildTopic(topicWithPartitions(5), sec, starts, lsos, ends, offsetSample{}, offsetSample{}, offsetSample{})
 
 	if tm.ReplicationFactor != 1 {
 		t.Errorf("ReplicationFactor = %d, want 1 — the minimum over ALL five partitions", tm.ReplicationFactor)
@@ -261,7 +261,7 @@ func TestBuildTopicUncappedEmitsEverything(t *testing.T) {
 	sec := newSection(sectionTopics)
 	starts, lsos, ends := noOffsets()
 
-	tm := c.buildTopic(topicWithPartitions(5), sec, starts, lsos, ends)
+	tm := c.buildTopic(topicWithPartitions(5), sec, starts, lsos, ends, offsetSample{}, offsetSample{}, offsetSample{})
 
 	if len(tm.Partitions) != 5 || tm.PartitionCount != 5 {
 		t.Errorf("emitted %d of %d partitions, want all five", len(tm.Partitions), tm.PartitionCount)
@@ -293,6 +293,7 @@ func TestBuildTopicOrdersTheOffsetChain(t *testing.T) {
 		offsetSample{api: "ListStartOffsets", sec: sec, listed: listed("orders", map[int32]int64{0: 10}), ok: true},
 		offsetSample{api: "ListCommittedOffsets", sec: lsoSec, listed: listed("orders", map[int32]int64{0: 100}), ok: true},
 		offsetSample{api: "ListEndOffsets", sec: endSec, listed: listed("orders", map[int32]int64{0: 137}), ok: true},
+		offsetSample{}, offsetSample{}, offsetSample{},
 	)
 
 	p := tm.Partitions[0]
@@ -321,6 +322,7 @@ func TestBuildTopicDisabledLSOIsNullNotZero(t *testing.T) {
 		offsetSample{api: "ListStartOffsets", sec: sec, listed: listed("orders", map[int32]int64{0: 10}), ok: true},
 		offsetSample{api: "ListCommittedOffsets", sec: lsoSec},
 		offsetSample{},
+		offsetSample{}, offsetSample{}, offsetSample{},
 	)
 
 	if p := tm.Partitions[0]; p.LastStableOffset != nil {
@@ -352,6 +354,7 @@ func TestBuildTopicPartialLSOOnlyDegradesItsOwnSection(t *testing.T) {
 		// Partition 1 is absent from the LSO listing.
 		offsetSample{api: "ListCommittedOffsets", sec: lsoSec, listed: listed("orders", map[int32]int64{0: 10}), ok: true},
 		offsetSample{api: "ListEndOffsets", sec: endSec, listed: listed("orders", full), ok: true},
+		offsetSample{}, offsetSample{}, offsetSample{},
 	)
 
 	if p := tm.Partitions[1]; p.LastStableOffset != nil || p.EndOffset == nil {
@@ -431,3 +434,88 @@ func TestCollectTopicsAlwaysReturnsThreeSections(t *testing.T) {
 }
 
 func int64Ptr(v int64) *int64 { return &v }
+
+// A partition with no records answers offset -1 and timestamp -1. Both must
+// travel as null: a real offset zero at the Unix epoch is a different claim.
+func TestMaxTimestampNullsTheEmptyPartitionSentinel(t *testing.T) {
+	sec := newSection(sectionTopicsMaxTS)
+	s := offsetSample{api: "ListMaxTimestampOffsets", sec: sec, ok: true, here: true,
+		listed: kadm.ListedOffsets{"orders": {
+			0: {Topic: "orders", Partition: 0, Offset: 41, Timestamp: 1750000000000, LeaderEpoch: 3},
+			1: {Topic: "orders", Partition: 1, Offset: -1, Timestamp: -1},
+		}}}
+
+	if got := s.maxTimestamp("orders", 0); got == nil ||
+		got.Offset == nil || *got.Offset != 41 ||
+		got.TimestampMs == nil || *got.TimestampMs != 1750000000000 ||
+		got.LeaderEpoch != 3 {
+		t.Fatalf("populated partition = %+v", got)
+	}
+
+	got := s.maxTimestamp("orders", 1)
+	if got == nil {
+		t.Fatal("an empty partition must still produce an entry")
+	}
+	if got.Offset != nil || got.TimestampMs != nil {
+		t.Errorf("empty partition = %+v, want both fields null", got)
+	}
+}
+
+// "The phase did not run" is the section status, not a per-partition value.
+func TestMaxTimestampReturnsNothingWhenThePhaseDidNotRun(t *testing.T) {
+	sec := newSection(sectionTopicsMaxTS)
+	s := offsetSample{api: "ListMaxTimestampOffsets", sec: sec, ok: false}
+	if got := s.maxTimestamp("orders", 0); got != nil {
+		t.Errorf("got %+v, want nil", got)
+	}
+}
+
+// The three later flavours are absent keys when their phases did not run, so a
+// backend cannot confuse "not collected" with "the broker answered null".
+func TestBuildTopicOmitsTheOptionalOffsetFlavoursWhenSkipped(t *testing.T) {
+	c := truncatingCollector(t, Limits{})
+	sec := newSection(sectionTopics)
+
+	tm := c.buildTopic(topicWithPartitions(1), sec,
+		offsetSample{api: "ListStartOffsets", sec: sec, listed: listed("orders", map[int32]int64{0: 10}), ok: true},
+		offsetSample{}, offsetSample{},
+		offsetSample{}, offsetSample{}, offsetSample{},
+	)
+
+	p := tm.Partitions[0]
+	if p.MaxTimestamp != nil {
+		t.Errorf("max_timestamp = %+v, want absent", p.MaxTimestamp)
+	}
+	if p.Tiered != nil {
+		t.Errorf("tiered = %+v, want absent", p.Tiered)
+	}
+}
+
+// KIP-1005 landed five releases after KIP-405, so a 3.4-3.8 cluster serves the
+// local start and not the remote end. One null inside a present object is a real
+// state, not an error.
+func TestBuildTopicCarriesLocalStartWithoutRemoteEnd(t *testing.T) {
+	c := truncatingCollector(t, Limits{})
+	sec := newSection(sectionTopics)
+	localSec := newSection(sectionTopicsLocal)
+	remoteSec := newSection(sectionTopicsRemote)
+	remoteSec.downgrade(metrics.SectionSkipped)
+
+	tm := c.buildTopic(topicWithPartitions(1), sec,
+		offsetSample{api: "ListStartOffsets", sec: sec, listed: listed("orders", map[int32]int64{0: 10}), ok: true},
+		offsetSample{}, offsetSample{}, offsetSample{},
+		offsetSample{api: "ListLocalLogStartOffsets", sec: localSec, listed: listed("orders", map[int32]int64{0: 900}), ok: true},
+		offsetSample{api: "ListLatestRemoteOffsets", sec: remoteSec},
+	)
+
+	p := tm.Partitions[0]
+	if p.Tiered == nil {
+		t.Fatal("tiered must be present when either flavour answered")
+	}
+	if p.Tiered.LocalStartOffset == nil || *p.Tiered.LocalStartOffset != 900 {
+		t.Errorf("local_start_offset = %v, want 900", p.Tiered.LocalStartOffset)
+	}
+	if p.Tiered.RemoteEndOffset != nil {
+		t.Errorf("remote_end_offset = %d, want null on a cluster below v9", *p.Tiered.RemoteEndOffset)
+	}
+}

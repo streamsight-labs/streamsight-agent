@@ -2,9 +2,12 @@ package collector
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kmsg"
 
 	"kafka-metrics-agent/internal/metrics"
 )
@@ -19,21 +22,68 @@ import (
 // in each phase would let the two sections disagree about which groups exist —
 // a data integrity bug, not a payload one. listed.Sorted() makes the retained
 // prefix the same set every cycle.
-func (c *Collector) listGroups(ctx context.Context) (ids []string, dropped int, err error) {
-	listed, err := c.client.Admin.ListGroups(ctx, c.opts.GroupStates...)
+func (c *Collector) listGroups(ctx context.Context) (ids []string, types map[string]string, dropped int, err error) {
+	listed, types, err := c.listGroupsWithTypes(ctx)
 
 	ids = make([]string, 0, len(listed))
-	for _, g := range listed.Sorted() {
-		if isInternalGroup(g.Group) {
+	for _, g := range listed {
+		if isInternalGroup(g) {
 			continue
 		}
-		if !c.groups.allow(g.Group) {
+		if !c.groups.allow(g) {
 			continue
 		}
-		ids = append(ids, g.Group)
+		ids = append(ids, g)
 	}
 	keep, dropped := capLen(len(ids), c.limits.MaxGroups)
-	return ids[:keep], dropped, err
+	return ids[:keep], types, dropped, err
+}
+
+// listGroupsWithTypes issues the ListGroups broadcast this cycle needs anyway,
+// and keeps the GroupType field that kadm's ListedGroup discards.
+//
+// This is NOT an extra request. kadm.ListGroups issues exactly the same
+// broadcast; it simply drops GroupType on the floor when converting the
+// response, the same way it drops TotalBytes/UsableBytes from DescribeLogDirs
+// (T1.9 solves that the same way).
+//
+// Below ListGroups v5 the field does not exist on the wire and every group maps
+// to "". Empty is deliberately NOT "classic": on a 2.6-3.x broker every group IS
+// classic, but the agent has not been told so, and a backend that renders the
+// two identically would report a completed KIP-848 migration on a cluster that
+// cannot run one.
+func (c *Collector) listGroupsWithTypes(ctx context.Context) ([]string, map[string]string, error) {
+	req := kmsg.NewPtrListGroupsRequest()
+	req.StatesFilter = c.opts.GroupStates
+
+	var (
+		groups   []string
+		types    = map[string]string{}
+		firstErr error
+	)
+	for _, shard := range c.client.RequestSharded(ctx, req) {
+		if shard.Err != nil {
+			if firstErr == nil {
+				firstErr = shard.Err
+			}
+			continue
+		}
+		resp, ok := shard.Resp.(*kmsg.ListGroupsResponse)
+		if !ok {
+			continue
+		}
+		if err := kerr.ErrorForCode(resp.ErrorCode); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		for _, g := range resp.Groups {
+			groups = append(groups, g.Group)
+			if g.GroupType != "" {
+				types[g.Group] = g.GroupType
+			}
+		}
+	}
+	sort.Strings(groups)
+	return groups, types, firstErr
 }
 
 // collectGroups describes every listed group. listedAt is when the shared
@@ -45,7 +95,7 @@ func (c *Collector) listGroups(ctx context.Context) (ids []string, dropped int, 
 // IncludeAuthorizedOperations on every DescribeGroups, so the KIP-430 bitfields
 // are already in hand and the authorized-operations phase surfaces them without
 // a request of its own.
-func (c *Collector) collectGroups(ctx context.Context, ids []string, listDropped int, listErr error, listedAt time.Time) ([]metrics.GroupMetrics, kadm.DescribedGroups, *section) {
+func (c *Collector) collectGroups(ctx context.Context, ids []string, types map[string]string, listDropped int, listErr error, listedAt time.Time) ([]metrics.GroupMetrics, kadm.DescribedGroups, *section) {
 	sec := c.newSectionAt(sectionGroups, listedAt)
 	defer sec.stop()
 
@@ -72,6 +122,9 @@ func (c *Collector) collectGroups(ctx context.Context, ids []string, listDropped
 			Coordinator:  g.Coordinator.NodeID,
 			Protocol:     g.Protocol,
 			ProtocolType: g.ProtocolType,
+			// Empty below ListGroups v5, and empty is NOT "classic" -- see
+			// listGroupsWithTypes.
+			GroupType: types[g.Group],
 			// -1 until a member's join metadata proves otherwise. DescribeGroups
 			// itself carries no generation.
 			Generation: -1,

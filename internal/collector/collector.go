@@ -81,6 +81,53 @@ type Options struct {
 	// O(partitions) of the selected topics.
 	AuthorizedOpsEvery int
 
+	// CollectMaxTimestamp adds partitions[].max_timestamp via ListOffsets at
+	// timestamp -3 (KIP-734, Kafka 3.0+). One extra ListOffsets fan-out, no new
+	// ACL: it is the same API key the four offset phases already use, and the
+	// broker authorizes before it reads the timestamp field.
+	//
+	// It defaults on because it replaces an inference with a measurement --
+	// "when was the last produce" is currently guessed from a run of zero
+	// end-offset deltas, which cannot tell a silent topic from a missed cycle.
+	CollectMaxTimestamp bool
+
+	// CollectTieredOffsets adds partitions[].tiered.local_start_offset via
+	// ListOffsets at timestamp -4 (KIP-405, Kafka 3.4+). Defaults OFF: on a
+	// cluster without remote storage it is a round trip per cycle that returns
+	// the same answer as the start offsets already collected.
+	CollectTieredOffsets bool
+	// CollectLatestTiered additionally asks for the remote end offset at
+	// timestamp -5 (KIP-1005, Kafka 3.9+). Gated apart from the local start
+	// because KIP-1005 landed five releases later, so 3.4-3.8 serves one and not
+	// the other. Ignored when CollectTieredOffsets is false.
+	CollectLatestTiered bool
+
+	// CollectShareGroups adds the share_groups section (KIP-932, Kafka 4.0+).
+	// Defaults off: no cluster below 4.0 can answer, and a share group is a
+	// different data model from a consumer group rather than a variant of one.
+	CollectShareGroups bool
+
+	// CollectConfigs adds the topic_configs and broker_configs sections via
+	// DescribeConfigs. It is the ONE phase that needs an ACL outside the
+	// DESCRIBE on CLUSTER, TOPIC and GROUP the rest of the agent lives inside --
+	// DESCRIBE_CONFIGS on TOPIC and on CLUSTER respectively -- and it defaults
+	// ON regardless, because what it collects is a correction, not a feature.
+	//
+	// cleanup.policy is the only way to know a topic is compacted, and on a
+	// compacted topic consumer lag is overstated by an unknowable amount.
+	// Defaulting this off would ship that wrong number by default.
+	// min.insync.replicas is the only way to tell "redundancy is reduced" from
+	// "every acks=all produce is failing right now".
+	//
+	// A principal without the grant loses these two sections to `unauthorized`
+	// and nothing else: no cycle fails, no other section degrades.
+	CollectConfigs bool
+	// ConfigsEvery runs the config phases on every Nth cycle; below 1 means
+	// every cycle. Configs change on human timescales and the response is
+	// O(topics + brokers) over an allowlist, so this wants to be the slowest
+	// cadence in the agent.
+	ConfigsEvery int
+
 	// CollectReassignments asks the controller which under-replicated partitions
 	// are moving on purpose. It costs nothing in steady state — the request is
 	// issued only when a URP is observed — so it defaults on.
@@ -228,6 +275,7 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		topicDetails kadm.TopicDetails
 
 		groupIDs      []string
+		groupTypes    map[string]string
 		groupsDropped int
 		listErr       error
 		listStart     time.Time
@@ -242,9 +290,13 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		windowOffsets *windowSample
 		reassignments []metrics.Reassignment
 		probes        []metrics.EpochProbe
+		topicConfigs  []metrics.TopicConfig
+		brokerConfigs []metrics.BrokerConfig
+		shareGroups   []metrics.ShareGroup
 
 		clusterSec, windowSec, groupsSec, offsetsSec *section
 		logDirsSec, reassignSec, epochSec            *section
+		topicCfgSec, brokerCfgSec, shareSec          *section
 		topicSecs                                    topicSections
 
 		wg sync.WaitGroup
@@ -257,9 +309,10 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		runWindow = runsThisCycle(c.opts.CollectThroughputWindow, c.opts.ThroughputWindowEvery, n)
 		runDirs   = runsThisCycle(c.opts.CollectLogDirs, c.opts.LogDirsEvery, n)
 		runAuth   = runsThisCycle(c.opts.CollectAuthorizedOps, c.opts.AuthorizedOpsEvery, n)
+		runCfg    = runsThisCycle(c.opts.CollectConfigs, c.opts.ConfigsEvery, n)
 	)
 
-	wg.Add(8)
+	wg.Add(11)
 
 	// Cluster metadata. Everything topic-shaped depends on it.
 	go func() {
@@ -273,13 +326,13 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 	go func() {
 		defer close(groupsListed)
 		listStart = time.Now()
-		groupIDs, groupsDropped, listErr = c.listGroups(ctx)
+		groupIDs, groupTypes, groupsDropped, listErr = c.listGroups(ctx)
 	}()
 
 	go func() {
 		defer wg.Done()
 		<-groupsListed
-		groups, described, groupsSec = c.collectGroups(ctx, groupIDs, groupsDropped, listErr, listStart)
+		groups, described, groupsSec = c.collectGroups(ctx, groupIDs, groupTypes, groupsDropped, listErr, listStart)
 	}()
 
 	// Committed offsets. Must complete before either ceiling — the last stable
@@ -318,6 +371,33 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		logDirs, logDirsSec = c.collectLogDirs(ctx, cluster, topicDetails, runDirs)
 	}()
 
+	// Share groups. Needs the cycle's group listing for the GroupType filter,
+	// not the described groups: a share group is never in DescribeGroups.
+	go func() {
+		defer wg.Done()
+		<-groupsListed
+		shareGroups, shareSec = c.collectShareGroups(ctx, groupTypes, c.opts.CollectShareGroups)
+	}()
+
+	// Topic configs, on their own cadence. Needs the topics phase for the name
+	// list, and waits on the end-offset sample for the same reason log_dirs
+	// does: an O(topics) response must not inflate the latency topics_end
+	// exists to pin down.
+	go func() {
+		defer wg.Done()
+		<-endDone
+		topicConfigs, topicCfgSec = c.collectTopicConfigs(ctx, topics, runCfg)
+	}()
+
+	// Broker configs, same cadence, different ACL. Needs only cluster metadata,
+	// but waits on the end sample for the same latency reason.
+	go func() {
+		defer wg.Done()
+		<-metaDone
+		<-endDone
+		brokerConfigs, brokerCfgSec = c.collectBrokerConfigs(ctx, cluster, runCfg)
+	}()
+
 	// Reassignments, triggered by a URP in the topics this cycle is shipping.
 	go func() {
 		defer wg.Done()
@@ -351,6 +431,9 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		ThroughputWindow: window,
 		Reassignments:    reassignments,
 		EpochProbes:      probes,
+		TopicConfigs:     topicConfigs,
+		BrokerConfigs:    brokerConfigs,
+		ShareGroups:      shareGroups,
 	}
 
 	// Post-passes over the finished batch. The first stamps entries the topics
@@ -368,9 +451,10 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 	secs := []*section{
 		clusterSec,
 		topicSecs.starts, windowSec, topicSecs.lso, topicSecs.end,
+		topicSecs.maxTS, topicSecs.local, topicSecs.remote,
 		groupsSec, offsetsSec,
 		statesSec, epochSec,
-		logDirsSec, reassignSec, authSec, rpcSec,
+		logDirsSec, reassignSec, topicCfgSec, brokerCfgSec, shareSec, authSec, rpcSec,
 	}
 	c.finalize(batch, secs, groupsDropped)
 

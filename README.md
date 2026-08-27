@@ -5,7 +5,9 @@ requests, turns the answers into one JSON object (a *batch*), and ships that bat
 to a local file, an HTTP endpoint, or stdout.
 
 It performs **no writes**: no produce, no consume, no topic or config mutation. The
-entire permission requirement is `DESCRIBE` on `CLUSTER`, `TOPIC` and `GROUP`.
+entire permission requirement is `DESCRIBE` on `CLUSTER`, `TOPIC` and `GROUP`, plus
+`DESCRIBE_CONFIGS` on `TOPIC` and `CLUSTER`. All five are read-only; `DESCRIBE_CONFIGS`
+reads configuration and is not `ALTER_CONFIGS`.
 
 ## How it works
 
@@ -16,7 +18,7 @@ flowchart TB
     AGT["agent.Run<br/>ticker, per-cycle deadline, batch envelope"]
     COL["collector.Collect<br/>thirteen phases, one cycle per tick"]
     KCL["kafka.Client<br/>kgo + kadm, SASL / TLS"]
-    KFK[("Kafka cluster<br/>READ-ONLY — no produce, no consume, no mutation<br/>whole grant: DESCRIBE on CLUSTER, TOPIC, GROUP")]
+    KFK[("Kafka cluster<br/>READ-ONLY — no produce, no consume, no mutation<br/>whole grant: DESCRIBE on CLUSTER, TOPIC, GROUP<br/>+ DESCRIBE_CONFIGS on TOPIC, CLUSTER")]
     BAT["metrics.Batch — schema_version 1<br/>one JSON object per cycle"]
     EXP["export.Exporter — EXPORT_MODE"]
     FIL["file<br/>rotating JSONL"]
@@ -258,6 +260,12 @@ configuration problems at once and exits non-zero — one restart per fix, not f
 | `COLLECT_THROUGHPUT_WINDOW` | `false` | Adds `throughput_window` and `partitions[].window` via `ListOffsetsAfterMilli`: the produce rate measured **by the broker**, and the only rate input in the batch that survives an agent restart or a missed cycle. Off by default because it adds a `ListOffsets` fan-out — two on a mostly-silent cluster — to every cycle it runs on. Needs ListOffsets v1 (Kafka 0.10.1+); startup disables it below that, where the broker answers with no timestamp at all and no error. No new ACL. |
 | `THROUGHPUT_WINDOW` | `5m` | How far back the window reaches. It earns its cost only when it is **wider than `COLLECTION_INTERVAL`**: inside one interval a backend can already difference two batches. Must be > 0. |
 | `THROUGHPUT_WINDOW_EVERY` | `1` | Run the window phase every Nth cycle. Must be >= 1. |
+| `COLLECT_MAX_TIMESTAMP` | `true` | Adds `partitions[].max_timestamp` — the newest record's timestamp and the offset carrying it — via `ListOffsets` at timestamp `-3` (KIP-734). **No new ACL**: same API key as the four offset phases, and the broker authorizes before it reads the timestamp field. It replaces an inference with a measurement: topic liveness is otherwise guessed from a run of zero end-offset deltas, which cannot tell a silent topic from a missed cycle. One extra `ListOffsets` fan-out; measured 4 ms on a 3-broker cluster. Needs Kafka 3.0+ (ListOffsets v7); below that the broker reads `-3` as a real millisecond and answers with an arbitrary offset **and no error**, which is why startup disables it rather than trusting the value. A partition with no max timestamp answers `-1` and ships `null`. |
+| `COLLECT_TIERED_OFFSETS` | `false` | Adds `partitions[].tiered.local_start_offset` via `ListOffsets` at `-4` (KIP-405): the earliest offset actually on the broker's **disk**, as opposed to `start_offset`, which on a tiered cluster is the global earliest including remote storage. A consumer reading between the two still succeeds and fetches from object storage at object-storage latency — a state nothing else in the batch distinguishes from healthy. Off by default because on a cluster without remote storage it returns the same answer as `start_offset` for the price of a round trip. Needs Kafka 3.4+ (ListOffsets v8). No new ACL. |
+| `COLLECT_LATEST_TIERED` | `true` | Additionally asks for `tiered.remote_end_offset` at `-5` (KIP-1005) — how far the archival tier is behind. **Ignored unless `COLLECT_TIERED_OFFSETS` is also set.** Gated apart from the local start because KIP-1005 landed five releases after KIP-405, so a 3.4–3.8 cluster serves one and not the other; one null inside a present `tiered` object is a real state, not an error. Needs Kafka 3.9+ (ListOffsets v9). No new ACL. |
+| `COLLECT_SHARE_GROUPS` | `false` | Adds the `share_groups[]` section via `ShareGroupDescribe` + `DescribeShareGroupOffsets` (KIP-932). Share groups are **not** consumer groups under another name: members share partitions and acknowledge individual records, so there is no committed offset per partition, no assignment to diff, and no lag in the committed-versus-end sense. They ship in their own section so no consumer-group derivation runs silently against a shape it does not model. Needs Kafka 4.0+. **Never exercised against a broker that can answer** — see `docs/ARCHITECTURE.md`. |
+| `COLLECT_CONFIGS` | `true` | Adds `topic_configs[]` and `broker_configs[]` via `DescribeConfigs`, over a fixed allowlist (10 topic keys, 11 broker keys). **The only collector that needs an ACL outside the three DESCRIBE grants** — `DESCRIBE_CONFIGS` on `TOPIC` and on `CLUSTER` — and it defaults **on** anyway, because what it collects is a correction rather than a feature. Without the grant these two sections report `unauthorized` and nothing else degrades; set `COLLECT_CONFIGS=false` to stop asking. `cleanup.policy` marks the compacted topics, where offset deltas are not record counts and consumer lag is overstated by an unknowable amount — without it the product reports a confident wrong number. `min.insync.replicas` separates "redundancy is reduced" from "every `acks=all` produce is failing right now", which the URP gauge alone cannot do. `offsets.retention.minutes` turns consumer overrun from a post-mortem into a prediction. Measured cost: **+517 B gzipped on the cycles it runs**, 8 B/batch amortised at the default cadence. Needs Kafka 1.1+ (DescribeConfigs v1, the version that carries `ConfigSource`); startup disables it below that rather than shipping every key as an indistinguishable default. |
+| `CONFIGS_EVERY` | `60` | Run the config phases every Nth cycle. The slowest cadence in the agent: configs change when a human changes them. Must be >= 1. |
 | `COLLECT_AUTHORIZED_OPS` | `true` | Adds `authorized_operations` on the cluster, each topic and each group (KIP-430), plus `principal` on the batch — the input to "grant `DESCRIBE_CONFIGS` on topic X to principal Y". One extra `Metadata` per sampled cycle; group bitfields ride the `DescribeGroups` the agent already issues. Needs Kafka 2.3+ (Metadata v8); startup disables it below that rather than shipping empty grants that read as broken ACLs. No new ACL. |
 | `AUTHORIZED_OPS_EVERY` | `10` | Run the ACL self-diagnostic every Nth cycle. Grants change on human timescales, and the request is O(partitions of the selected topics). Must be >= 1. |
 | `COLLECT_REASSIGNMENTS` | `true` | Adds `reassignments[]` via `ListPartitionReassignments` — "is this URP a failure or a planned move", the largest false-positive source in URP alerting. **The request is issued only when an under-replicated partition is observed**, so in a healthy cluster it costs one pass over a slice and the section reports `skipped`. Needs Kafka 2.4+. No new ACL. |
@@ -639,6 +647,8 @@ you do), then grant the agent these three permissions and nothing else.
 | `CLUSTER` | `DESCRIBE` | `Metadata` (brokers, controller, cluster ID), `ListGroups`, `DescribeLogDirs` — the broker gates that whole handler on `DESCRIBE` of `CLUSTER`, so with `COLLECT_LOG_DIRS=true` this grant is load-bearing for a data section, not only for cluster metadata — and `ListPartitionReassignments` |
 | `TOPIC` | `DESCRIBE` | Topic and partition metadata, including the KIP-430 authorized-operations bitfields; `ListOffsets` for start offsets, end offsets, the `read_committed` last stable offset **and the by-timestamp throughput window** — all one API key, and the broker authorizes it before reading the isolation level or the timestamp; `OffsetForLeaderEpoch`; and the topics inside `OffsetFetch` |
 | `GROUP` | `DESCRIBE` | `DescribeGroups`, `ConsumerGroupDescribe` and `OffsetFetch` |
+| `TOPIC` | `DESCRIBE_CONFIGS` | `DescribeConfigs` for `topic_configs[]` — `cleanup.policy` is the only thing that identifies a compacted topic, where consumer lag is otherwise overstated by an unknowable amount |
+| `CLUSTER` | `DESCRIBE_CONFIGS` | `DescribeConfigs` for `broker_configs[]` — `offsets.retention.minutes` predicts group-offset expiry; per-broker drift on `min.insync.replicas` |
 
 That is the complete set. `ApiVersions` (the startup probes) is answered before
 authentication completes and carries no ACL at all.
@@ -670,7 +680,9 @@ docker run --rm -v "$PWD/scripts:/scripts:ro" --network host \
   /scripts/setup-kafka-user.sh -b localhost:9092 -p <agent-password>
 ```
 
-The script creates the SCRAM credential and the three ACLs, and handles both CLI naming
+The script creates the SCRAM credential and all five ACLs. Pass `--no-configs` to skip the
+two `DESCRIBE_CONFIGS` grants on a cluster whose policy forbids them, and set
+`COLLECT_CONFIGS=false` on the agent to match. It handles both CLI naming
 conventions (`kafka-acls.sh` in the Apache tarball, `kafka-acls` in the Confluent and
 Bitnami images). `-h` lists every option; `-n` is a dry run that prints exactly what would
 be granted, and `-c <admin.properties>` is not optional on a secured cluster — without
@@ -691,6 +703,14 @@ $ACL --cluster
 $ACL --topic '*' --resource-pattern-type literal
 $ACL --group '*' --resource-pattern-type literal
 
+# 3. The two config ACLs. Read-only, and NOT ALTER_CONFIGS: they permit
+#    reading configuration, never changing it. Skip them only if policy
+#    forbids them, and set COLLECT_CONFIGS=false to match — the cost is
+#    that lag on compacted topics is wrong and cannot be flagged as such.
+CFG="kafka-acls.sh $BS --add --allow-principal User:streamsight-agent --operation DESCRIBE_CONFIGS"
+$CFG --topic '*' --resource-pattern-type literal
+$CFG --cluster
+
 kafka-acls.sh $BS --list --principal User:streamsight-agent
 ```
 
@@ -702,7 +722,7 @@ with `*` — i.e. nothing, and the agent will report `unauthorized` sections whi
 
 ### Managed Kafka services
 
-All of them need the same three DESCRIBE grants; only the tooling differs.
+All of them need the same five read-only grants; only the tooling differs.
 
 **Confluent Cloud** — create a service account and API key, then grant
 `--operations DESCRIBE` with `--cluster-scope`, `--topic '*'` and `--consumer-group '*'`
@@ -710,6 +730,11 @@ via `confluent kafka acl create`. Use the API key as `KAFKA_SASL_USERNAME` /
 `KAFKA_SASL_PASSWORD` with `KAFKA_SASL_MECHANISM=PLAIN` and `KAFKA_TLS_ENABLED=true`.
 
 **AWS MSK** — SASL/SCRAM only; MSK IAM auth is a different mechanism and is not supported.
+Grant the ACLs below with `kafka-acls.sh`, exactly as on a self-managed cluster. (For
+reference, MSK's IAM policy language names the same two grants
+`kafka-cluster:DescribeTopicDynamicConfiguration` and
+`kafka-cluster:DescribeClusterDynamicConfiguration` — but the agent does not speak IAM auth,
+so that path does not apply here.)
 
 ```bash
 aws secretsmanager create-secret --name AmazonMSK_streamsight-agent \

@@ -65,16 +65,28 @@ func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, be
 	sec := c.newSection(sectionTopics)
 	defer sec.stop()
 
-	// skipped builds the two later sections for a path that never reached them.
-	// Every return below carries all three, so a backend can always tell "not
-	// collected" from "collected, empty".
+	// skipped builds the five later sections for a path that never reached them.
+	// Every return below carries all six, so a backend can always tell "not
+	// collected" from "collected, empty" -- and so that a section never arrives
+	// nameless, which is what a nil *section serialises to.
 	skipped := func() topicSections {
-		lso, end := c.newSection(sectionTopicsLSO), c.newSection(sectionTopicsEnd)
-		lso.downgrade(metrics.SectionSkipped)
-		end.downgrade(metrics.SectionSkipped)
-		lso.stop()
-		end.stop()
-		return topicSections{starts: sec, lso: lso, end: end}
+		out := topicSections{starts: sec}
+		for _, p := range []struct {
+			name string
+			dst  **section
+		}{
+			{sectionTopicsLSO, &out.lso},
+			{sectionTopicsEnd, &out.end},
+			{sectionTopicsMaxTS, &out.maxTS},
+			{sectionTopicsLocal, &out.local},
+			{sectionTopicsRemote, &out.remote},
+		} {
+			sub := c.newSection(p.name)
+			sub.downgrade(metrics.SectionSkipped)
+			sub.stop()
+			*p.dst = sub
+		}
+		return out
 	}
 
 	if tds == nil {
@@ -133,16 +145,69 @@ func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, be
 	endsOK := endSec.requestPartial("ListEndOffsets", err, len(ends) > 0)
 	endSec.stop()
 
+	// The three flavours below are OUTSIDE the start <= committed <= LSO <= end
+	// chain and must stay after it. They are the same ListOffsets API key with a
+	// different timestamp sentinel, so they need no permission the four above did
+	// not already need -- but each costs a round trip, and issuing any of them
+	// earlier would inflate the very sample latency topics_end exists to pin
+	// down.
+	maxTSSec := c.newSection(sectionTopicsMaxTS)
+	var (
+		maxTS   kadm.ListedOffsets
+		maxTSOK bool
+	)
+	if c.opts.CollectMaxTimestamp {
+		maxTS, err = c.client.Admin.ListMaxTimestampOffsets(ctx, names...)
+		maxTSOK = maxTSSec.requestPartial("ListMaxTimestampOffsets", err, len(maxTS) > 0)
+	} else {
+		maxTSSec.downgrade(metrics.SectionSkipped)
+	}
+	maxTSSec.stop()
+
+	localSec := c.newSection(sectionTopicsLocal)
+	var (
+		locals   kadm.ListedOffsets
+		localsOK bool
+	)
+	if c.opts.CollectTieredOffsets {
+		locals, err = c.client.Admin.ListLocalLogStartOffsets(ctx, names...)
+		localsOK = localSec.requestPartial("ListLocalLogStartOffsets", err, len(locals) > 0)
+	} else {
+		localSec.downgrade(metrics.SectionSkipped)
+	}
+	localSec.stop()
+
+	// Gated separately from local starts: KIP-1005 landed five releases after
+	// KIP-405, so a 3.4-3.8 cluster serves -4 and not -5.
+	remoteSec := c.newSection(sectionTopicsRemote)
+	var (
+		remotes   kadm.ListedOffsets
+		remotesOK bool
+	)
+	if c.opts.CollectTieredOffsets && c.opts.CollectLatestTiered {
+		remotes, err = c.client.Admin.ListLatestRemoteOffsets(ctx, names...)
+		remotesOK = remoteSec.requestPartial("ListLatestRemoteOffsets", err, len(remotes) > 0)
+	} else {
+		remoteSec.downgrade(metrics.SectionSkipped)
+	}
+	remoteSec.stop()
+
 	topics := make([]metrics.TopicMetrics, 0, len(selected))
 	for _, td := range selected {
 		topics = append(topics, c.buildTopic(td, sec,
 			offsetSample{api: "ListStartOffsets", sec: sec, listed: starts, ok: startsOK},
 			offsetSample{api: "ListCommittedOffsets", sec: lsoSec, listed: lsos, ok: lsosOK},
 			offsetSample{api: "ListEndOffsets", sec: endSec, listed: ends, ok: endsOK},
+			offsetSample{api: "ListMaxTimestampOffsets", sec: maxTSSec, listed: maxTS, ok: maxTSOK},
+			offsetSample{api: "ListLocalLogStartOffsets", sec: localSec, listed: locals, ok: localsOK},
+			offsetSample{api: "ListLatestRemoteOffsets", sec: remoteSec, listed: remotes, ok: remotesOK},
 		))
 	}
 
-	return topics, topicSections{starts: sec, lso: lsoSec, end: endSec}
+	return topics, topicSections{
+		starts: sec, lso: lsoSec, end: endSec,
+		maxTS: maxTSSec, local: localSec, remote: remoteSec,
+	}
 }
 
 // topicSections are the three sections the topics phase emits, in the order
@@ -152,6 +217,9 @@ type topicSections struct {
 	starts *section
 	lso    *section
 	end    *section
+	maxTS  *section
+	local  *section
+	remote *section
 }
 
 // offsetSample is one List*Offsets result together with the section that owns
@@ -210,7 +278,7 @@ func selectTopics(tds kadm.TopicDetails, f *filter, includeInternal bool, maxTop
 // buildTopic shapes one topic's metrics and records its per-partition failures.
 // It touches no Kafka client, so the truncation invariants below are reachable
 // from a test.
-func (c *Collector) buildTopic(td kadm.TopicDetail, sec *section, starts, lsos, ends offsetSample) metrics.TopicMetrics {
+func (c *Collector) buildTopic(td kadm.TopicDetail, sec *section, starts, lsos, ends, maxTS, locals, remotes offsetSample) metrics.TopicMetrics {
 	tm := metrics.TopicMetrics{
 		Name:     td.Topic,
 		Internal: td.IsInternal,
@@ -243,6 +311,9 @@ func (c *Collector) buildTopic(td kadm.TopicDetail, sec *section, starts, lsos, 
 	starts.enter(td.Topic)
 	lsos.enter(td.Topic)
 	ends.enter(td.Topic)
+	maxTS.enter(td.Topic)
+	locals.enter(td.Topic)
+	remotes.enter(td.Topic)
 
 	tm.Partitions = make([]metrics.Partition, 0, len(emit))
 	for _, p := range emit {
@@ -272,6 +343,19 @@ func (c *Collector) buildTopic(td kadm.TopicDetail, sec *section, starts, lsos, 
 		part.EndOffset, err = ends.lookup(td.Topic, p.Partition)
 		if err != nil && part.ErrorCode == 0 {
 			part.ErrorCode = errorCode(err)
+		}
+
+		// The three below attach as their own nested objects rather than as more
+		// fields on Partition, so that "the phase did not run" is an absent key
+		// and cannot be confused with "the broker answered null".
+		if maxTS.here {
+			part.MaxTimestamp = maxTS.maxTimestamp(td.Topic, p.Partition)
+		}
+		if locals.here || remotes.here {
+			t := &metrics.TieredOffsets{}
+			t.LocalStartOffset, _ = locals.lookup(td.Topic, p.Partition)
+			t.RemoteEndOffset, _ = remotes.lookup(td.Topic, p.Partition)
+			part.Tiered = t
 		}
 		tm.Partitions = append(tm.Partitions, part)
 	}
@@ -342,4 +426,36 @@ func internalTopics(tds kadm.TopicDetails) map[string]bool {
 		}
 	}
 	return internal
+}
+
+// maxTimestamp resolves one partition's ListOffsets(-3) answer.
+//
+// It cannot reuse lookup because this is the one offset flavour whose timestamp
+// is the point: lookup returns only the offset, and a max-timestamp offset
+// without its timestamp answers nothing. A partition holding no records reports
+// offset -1 and timestamp -1, which both travel as null rather than as a real
+// offset zero at the epoch.
+func (s *offsetSample) maxTimestamp(topic string, partition int32) *metrics.MaxTimestampOffset {
+	if !s.here {
+		return nil
+	}
+	lo, ok := s.listed.Lookup(topic, partition)
+	if !ok {
+		return nil
+	}
+	out := &metrics.MaxTimestampOffset{LeaderEpoch: lo.LeaderEpoch}
+	if lo.Err != nil {
+		out.ErrorCode = errorCode(lo.Err)
+		s.sec.recordPartition(s.api, topic, partition, lo.Err)
+		return out
+	}
+	if lo.Offset >= 0 {
+		offset := lo.Offset
+		out.Offset = &offset
+	}
+	if lo.Timestamp >= 0 {
+		ts := lo.Timestamp
+		out.TimestampMs = &ts
+	}
+	return out
 }

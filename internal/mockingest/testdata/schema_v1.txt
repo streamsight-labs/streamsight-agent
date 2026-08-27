@@ -43,6 +43,14 @@ agent.uptime_sec int64
 agent_instance_id string
 agent_version string
 batch_seq uint64
+broker_configs []metrics.BrokerConfig omitempty
+broker_configs[].broker int32
+broker_configs[].configs []metrics.ConfigEntry
+broker_configs[].configs[].key string
+broker_configs[].configs[].sensitive bool omitempty
+broker_configs[].configs[].source string omitempty
+broker_configs[].configs[].value *string nullable
+broker_configs[].error_code int16 omitempty
 cluster metrics.ClusterMetrics
 cluster.authorized_operations *metrics.AuthorizedOps nullable omitempty
 cluster.authorized_operations.bitfield *int32 nullable
@@ -121,6 +129,7 @@ groups[].coordinator int32
 groups[].error_code int16 omitempty
 groups[].generation int32
 groups[].group_epoch *int32 nullable omitempty
+groups[].group_type string omitempty
 groups[].id string
 groups[].member_count int
 groups[].members []metrics.GroupMember
@@ -193,9 +202,45 @@ sections[].name string
 sections[].sampled_at time.Time
 sections[].status metrics.SectionStatus
 sections[].truncated bool omitempty
+share_groups []metrics.ShareGroup omitempty
+share_groups[].assignment_epoch int32
+share_groups[].assignor string omitempty
+share_groups[].authorized_operations *metrics.AuthorizedOps nullable omitempty
+share_groups[].authorized_operations.bitfield *int32 nullable
+share_groups[].authorized_operations.operations []string
+share_groups[].coordinator int32
+share_groups[].error_code int16 omitempty
+share_groups[].group_epoch int32
+share_groups[].id string
+share_groups[].member_count int
+share_groups[].members []metrics.ShareGroupMember
+share_groups[].members[].assignment []metrics.TopicPartition omitempty
+share_groups[].members[].assignment[].partition int32
+share_groups[].members[].assignment[].topic string
+share_groups[].members[].client_id string
+share_groups[].members[].host string
+share_groups[].members[].member_epoch int32
+share_groups[].members[].member_id string
+share_groups[].members[].rack *string nullable omitempty
+share_groups[].members[].subscribed_topics []string omitempty
+share_groups[].start_offsets []metrics.ShareGroupOffset omitempty
+share_groups[].start_offsets[].error_code int16 omitempty
+share_groups[].start_offsets[].leader_epoch int32
+share_groups[].start_offsets[].partition int32
+share_groups[].start_offsets[].start_offset *int64 nullable
+share_groups[].start_offsets[].topic string
+share_groups[].state string
 throughput_window *metrics.ThroughputWindow nullable omitempty
 throughput_window.requested_ms int64
 throughput_window.width_ms int64
+topic_configs []metrics.TopicConfig omitempty
+topic_configs[].configs []metrics.ConfigEntry
+topic_configs[].configs[].key string
+topic_configs[].configs[].sensitive bool omitempty
+topic_configs[].configs[].source string omitempty
+topic_configs[].configs[].value *string nullable
+topic_configs[].error_code int16 omitempty
+topic_configs[].topic string
 topics []metrics.TopicMetrics
 topics[].authorized_operations *metrics.AuthorizedOps nullable omitempty
 topics[].authorized_operations.bitfield *int32 nullable
@@ -213,9 +258,17 @@ topics[].partitions[].isr []int32
 topics[].partitions[].last_stable_offset *int64 nullable
 topics[].partitions[].leader int32
 topics[].partitions[].leader_epoch int32
+topics[].partitions[].max_timestamp *metrics.MaxTimestampOffset nullable omitempty
+topics[].partitions[].max_timestamp.error_code int16 omitempty
+topics[].partitions[].max_timestamp.leader_epoch int32
+topics[].partitions[].max_timestamp.offset *int64 nullable
+topics[].partitions[].max_timestamp.timestamp_ms *int64 nullable
 topics[].partitions[].offline_replicas []int32 omitempty
 topics[].partitions[].replicas []int32
 topics[].partitions[].start_offset *int64 nullable
+topics[].partitions[].tiered *metrics.TieredOffsets nullable omitempty
+topics[].partitions[].tiered.local_start_offset *int64 nullable
+topics[].partitions[].tiered.remote_end_offset *int64 nullable
 topics[].partitions[].window *metrics.WindowOffset nullable omitempty
 topics[].partitions[].window.error_code int16 omitempty
 topics[].partitions[].window.leader_epoch int32

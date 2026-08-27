@@ -64,6 +64,22 @@ type Batch struct {
 	// probe fires only on a committed-vs-current leader-epoch mismatch.
 	EpochProbes []EpochProbe `json:"epoch_probes,omitempty"`
 
+	// TopicConfigs and BrokerConfigs are allowlisted DescribeConfigs answers.
+	// They are the only section needing an ACL outside the DESCRIBE on CLUSTER,
+	// TOPIC and GROUP the rest of the agent lives inside, so they are off by
+	// default -- and they are TWO sections rather than one: DESCRIBE_CONFIGS is
+	// granted separately on TOPIC and on CLUSTER, and a principal holding one
+	// and not the other must see one section ok and the other unauthorized.
+	//
+	// Both are absent when the phase did not run. Read the section status.
+	TopicConfigs  []TopicConfig  `json:"topic_configs,omitempty"`
+	BrokerConfigs []BrokerConfig `json:"broker_configs,omitempty"`
+
+	// ShareGroups are KIP-932 share groups (Kafka 4.0+). A separate section from
+	// groups[] on purpose: they have no partition ownership and no committed
+	// offset, so no consumer-group derivation in this batch applies to them.
+	ShareGroups []ShareGroup `json:"share_groups,omitempty"`
+
 	// Principal is the SASL username the agent authenticated as, and the "Z" in
 	// "grant X on Y to Z" when a backend renders an authorized_operations gap. It
 	// is a username, never a credential, and is empty for anonymous or
@@ -554,6 +570,27 @@ type Partition struct {
 	// nothing distinguishes "too old" yet.
 	LastStableOffset *int64 `json:"last_stable_offset"`
 
+	// MaxTimestamp is the newest record's timestamp and the offset carrying it
+	// (ListOffsets timestamp -3, KIP-734). Absent when the phase did not run.
+	//
+	// It answers "when was the last produce" directly, rather than inferring it
+	// from a run of zero end-offset deltas -- an inference that cannot tell a
+	// silent topic from a missed cycle.
+	//
+	// MEASURED TRAP, do not compare Offset to EndOffset naively. This phase is
+	// issued AFTER topics_end, so on a live partition Offset is routinely
+	// GREATER than EndOffset: records arrived between the two samples. Observed
+	// on a real cluster: offset 72182 against an end offset of 72175. A
+	// backwards-timestamp check is only sound when the partition did not advance
+	// between the two samples -- compare the sections' sampled_at first, and skip
+	// the partition when EndOffset moved.
+	MaxTimestamp *MaxTimestampOffset `json:"max_timestamp,omitempty"`
+
+	// Tiered is the tiered-storage view (KIP-405 / KIP-1005). Absent when the
+	// phase did not run, which is the normal case: it is only worth asking on a
+	// cluster with remote storage enabled.
+	Tiered *TieredOffsets `json:"tiered,omitempty"`
+
 	// Window is the broker's answer for Batch.ThroughputWindow on this partition.
 	// Absent when the window phase did not run; read the section status, not the
 	// key's absence.
@@ -811,6 +848,14 @@ type GroupMetrics struct {
 	Generation   int32  `json:"generation"`
 	Protocol     string `json:"protocol,omitempty"`
 	ProtocolType string `json:"protocol_type,omitempty"`
+	// GroupType is "classic" or "consumer" (KIP-848), from ListGroups v5+.
+	// Empty below v5, which is not the same as "classic": a cluster that cannot
+	// report the type must not be read as one where every group is classic.
+	//
+	// kadm's ListedGroup discards this field, so the agent issues its own raw
+	// ListGroups -- the same request it was already broadcasting, not an extra
+	// one. Same reason T1.9 reads log-dir volume bytes off a raw request.
+	GroupType string `json:"group_type,omitempty"`
 	// MemberCount is the coordinator's member count, computed BEFORE any cap.
 	// len(Members) < MemberCount means the member list was truncated.
 	MemberCount int           `json:"member_count"`
@@ -911,5 +956,148 @@ type PartitionOffset struct {
 	// regressions are told apart from corruption. -1 means unknown.
 	LeaderEpoch int32  `json:"leader_epoch"`
 	Metadata    string `json:"metadata,omitempty"`
+	ErrorCode   int16  `json:"error_code,omitempty"`
+}
+
+// ConfigEntry is one allowlisted configuration key.
+//
+// Value is a pointer because a config genuinely having no value is distinct
+// from having an empty one, and because a SENSITIVE config arrives with its
+// value stripped by the broker. Nil therefore means "not disclosed", never "".
+//
+// Source is the wire enum rendered as a name (DYNAMIC_TOPIC_CONFIG,
+// STATIC_BROKER_CONFIG, DEFAULT_CONFIG, ...). It is what separates "somebody set
+// this" from "this is the shipped default", which is the whole of config-drift
+// detection and of a config-change timeline.
+type ConfigEntry struct {
+	Key   string  `json:"key"`
+	Value *string `json:"value"`
+	// Sensitive is echoed so a backend can render "redacted by the broker"
+	// rather than "unset". The agent never ships a sensitive value even when a
+	// broker sends one.
+	Sensitive bool   `json:"sensitive,omitempty"`
+	Source    string `json:"source,omitempty"`
+}
+
+// TopicConfig is the allowlisted config of one topic.
+//
+// The two keys this section exists for:
+//
+//   - cleanup.policy. On a compacted topic the offset range is not a record
+//     count: compaction removes records and leaves the offsets consumed, so
+//     end_offset - committed_offset counts gaps that hold nothing. Consumer lag
+//     on a compacted topic is overstated by an unknowable amount, and without
+//     this key a backend cannot even mark the topic as unreliable. That is a
+//     correction; everything else here is a feature.
+//   - min.insync.replicas. len(isr) < len(replicas) means redundancy is
+//     reduced. len(isr) < min.insync.replicas means every acks=all produce is
+//     failing right now. Identical wire data, opposite severity, and the second
+//     is unknowable without this key.
+type TopicConfig struct {
+	Topic     string        `json:"topic"`
+	ErrorCode int16         `json:"error_code,omitempty"`
+	Configs   []ConfigEntry `json:"configs"`
+}
+
+// BrokerConfig is the allowlisted config of one broker.
+//
+// Per-broker rather than cluster-wide on purpose: DescribeBrokerConfigs with no
+// broker IDs answers with cluster-level DYNAMIC config only, which cannot show
+// drift and would arrive labelled with whichever broker served it. "Broker 3
+// has a different min.insync.replicas" is silently fatal and invisible to every
+// other tool, and it is only visible if each broker is asked about itself.
+//
+// offsets.retention.minutes is the key that turns consumer overrun from a
+// post-mortem into a prediction: it is how long the coordinator keeps a group's
+// committed offsets after the group empties.
+type BrokerConfig struct {
+	Broker    int32         `json:"broker"`
+	ErrorCode int16         `json:"error_code,omitempty"`
+	Configs   []ConfigEntry `json:"configs"`
+}
+
+// MaxTimestampOffset is ListOffsets at timestamp -3: the largest record
+// timestamp in the partition, and the offset carrying it.
+//
+// Both fields are nullable for the usual reason -- a broker that could not
+// answer must not look like one that answered zero -- and additionally because
+// a partition holding no records has no max timestamp at all.
+type MaxTimestampOffset struct {
+	Offset      *int64 `json:"offset"`
+	TimestampMs *int64 `json:"timestamp_ms"`
+	LeaderEpoch int32  `json:"leader_epoch"`
+	ErrorCode   int16  `json:"error_code,omitempty"`
+}
+
+// TieredOffsets is the pair of tiered-storage boundaries.
+//
+// On a cluster with remote storage, StartOffset (the global earliest) can sit far
+// below what is actually on the broker's disk. A consumer reading between
+// LocalStartOffset and StartOffset still succeeds -- and every fetch it issues
+// goes to object storage, at object-storage latency. Nothing else in the batch
+// tells that apart from a healthy consumer, which is the gap this closes.
+//
+// The two fields have different version floors (ListOffsets v8 and v9), so one
+// may be null while the other is set. That is a real state, not an error.
+type TieredOffsets struct {
+	// LocalStartOffset is the earliest offset on the broker's own disk
+	// (timestamp -4, KIP-405). Null below ListOffsets v8.
+	LocalStartOffset *int64 `json:"local_start_offset"`
+	// RemoteEndOffset is the latest offset in remote storage (timestamp -5,
+	// KIP-1005). Null below ListOffsets v9. StartOffset minus this is how far
+	// behind the archival tier is running.
+	RemoteEndOffset *int64 `json:"remote_end_offset"`
+}
+
+// ShareGroup is one KIP-932 share group. Kafka 4.0+.
+//
+// Share groups are NOT consumer groups under another name, and none of the
+// consumer-group derivations apply to them. There is no partition ownership --
+// members share partitions and acknowledge individual records -- so there is no
+// per-partition committed offset, no member assignment to diff, and no lag in
+// the committed-versus-end sense. They travel in their own section for exactly
+// that reason: folding them into groups[] would let every existing consumer
+// signal silently describe something it does not model.
+//
+// StartOffsets is the closest analogue to a committed offset: the share-partition
+// start offset, before which records are no longer deliverable.
+type ShareGroup struct {
+	ID              string `json:"id"`
+	State           string `json:"state"`
+	Coordinator     int32  `json:"coordinator"`
+	GroupEpoch      int32  `json:"group_epoch"`
+	AssignmentEpoch int32  `json:"assignment_epoch"`
+	Assignor        string `json:"assignor,omitempty"`
+	ErrorCode       int16  `json:"error_code,omitempty"`
+
+	MemberCount int                `json:"member_count"`
+	Members     []ShareGroupMember `json:"members"`
+
+	// StartOffsets is the share-partition start offset per topic-partition.
+	// Empty both when the offsets phase did not run and when the group holds
+	// none -- read the share_groups section status, never len().
+	StartOffsets []ShareGroupOffset `json:"start_offsets,omitempty"`
+
+	AuthorizedOperations *AuthorizedOps `json:"authorized_operations,omitempty"`
+}
+
+// ShareGroupMember is one member of a share group. Assignment here is which
+// partitions the member may fetch from, NOT which it exclusively owns.
+type ShareGroupMember struct {
+	MemberID         string           `json:"member_id"`
+	ClientID         string           `json:"client_id"`
+	Host             string           `json:"host"`
+	Rack             *string          `json:"rack,omitempty"`
+	MemberEpoch      int32            `json:"member_epoch"`
+	SubscribedTopics []string         `json:"subscribed_topics,omitempty"`
+	Assignment       []TopicPartition `json:"assignment,omitempty"`
+}
+
+// ShareGroupOffset is one share-partition start offset.
+type ShareGroupOffset struct {
+	Topic       string `json:"topic"`
+	Partition   int32  `json:"partition"`
+	StartOffset *int64 `json:"start_offset"`
+	LeaderEpoch int32  `json:"leader_epoch"`
 	ErrorCode   int16  `json:"error_code,omitempty"`
 }

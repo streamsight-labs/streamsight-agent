@@ -70,6 +70,17 @@ const (
 	// enough: kadm sends only LeaderEpoch, never the v2+ CurrentLeaderEpoch.
 	offsetForLeaderEpochKey = 23
 
+	// shareGroupDescribeKey is the ShareGroupDescribe API key (KIP-932,
+	// Kafka 4.0). Absent on every broker in existence today outside a 4.x
+	// cluster, which is why the phase it gates defaults off.
+	shareGroupDescribeKey = 77
+
+	// describeConfigsKey is the DescribeConfigs API key. v0 exists from Kafka
+	// 0.11, but v1 (Kafka 1.1) is the floor that matters: it added ConfigSource,
+	// and without it every config arrives indistinguishable from a default,
+	// which is the whole of drift detection and the change timeline.
+	describeConfigsKey = 32
+
 	// listPartitionReassignmentsKey is the ListPartitionReassignments API key
 	// (Kafka 2.4). Its max version is still 0, so presence is the capability.
 	listPartitionReassignmentsKey = 46
@@ -111,6 +122,8 @@ var probedKeys = []int16{
 	offsetForLeaderEpochKey,
 	describeLogDirsKey,
 	listPartitionReassignmentsKey,
+	describeConfigsKey,
+	shareGroupDescribeKey,
 	consumerGroupDescribeKey,
 }
 
@@ -272,6 +285,48 @@ func (c *Capabilities) SupportsOffsetForLeaderEpoch() bool {
 // ListPartitionReassignments (Kafka 2.4+).
 func (c *Capabilities) SupportsListPartitionReassignments() bool {
 	return c.atLeast(listPartitionReassignmentsKey, 0)
+}
+
+// SupportsMaxTimestampOffsets gates ListOffsets timestamp -3 (KIP-734, Kafka
+// 3.0, request v7). Below it the broker has no notion of the sentinel and
+// answers as though a real millisecond had been asked for, which would return an
+// arbitrary offset with no error -- the failure mode this probe exists to avoid.
+func (c *Capabilities) SupportsMaxTimestampOffsets() bool {
+	return c.atLeast(listOffsetsKey, 7)
+}
+
+// SupportsLocalLogStartOffsets gates ListOffsets timestamp -4 (KIP-405, Kafka
+// 3.4, request v8).
+func (c *Capabilities) SupportsLocalLogStartOffsets() bool {
+	return c.atLeast(listOffsetsKey, 8)
+}
+
+// SupportsLatestTieredOffsets gates ListOffsets timestamp -5 (KIP-1005, Kafka
+// 3.9, request v9).
+func (c *Capabilities) SupportsLatestTieredOffsets() bool {
+	return c.atLeast(listOffsetsKey, 9)
+}
+
+// SupportsListGroupsTypes gates the GroupType field on the ListGroups response
+// (KIP-848, request v5). Below it the field is absent, and an absent type must
+// ship empty rather than defaulting to "classic": "we cannot tell" and "it is
+// classic" are different answers, and only the first is honest on a 2.x broker.
+func (c *Capabilities) SupportsListGroupsTypes() bool {
+	return c.atLeast(listGroupsKey, 5)
+}
+
+// SupportsShareGroupDescribe gates the share_groups section (KIP-932, Kafka
+// 4.0).
+func (c *Capabilities) SupportsShareGroupDescribe() bool {
+	return c.atLeast(shareGroupDescribeKey, 0)
+}
+
+// SupportsDescribeConfigs gates the topic_configs and broker_configs sections
+// on v1, not v0. v0 answers without ConfigSource, so every key would ship with
+// an empty source and a backend could not tell "an operator set this" from
+// "this is the shipped default" -- which is what config drift IS.
+func (c *Capabilities) SupportsDescribeConfigs() bool {
+	return c.atLeast(describeConfigsKey, 1)
 }
 
 // All is the whole fingerprint keyed by capability name, for shipping on the

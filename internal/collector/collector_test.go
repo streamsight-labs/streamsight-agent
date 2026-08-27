@@ -121,9 +121,12 @@ func TestFinalizeReportsCollapsedErrorsAtBatchLevel(t *testing.T) {
 var canonicalSections = []string{
 	sectionCluster,
 	sectionTopics, sectionTopicsWindow, sectionTopicsLSO, sectionTopicsEnd,
+	sectionTopicsMaxTS, sectionTopicsLocal, sectionTopicsRemote,
 	sectionGroups, sectionOffsets,
 	sectionGroupStates, sectionEpochProbes,
-	sectionLogDirs, sectionReassignments, sectionAuthorizedOps, sectionBrokerRPC,
+	sectionLogDirs, sectionReassignments,
+	sectionTopicConfigs, sectionBrokerConfigs, sectionShareGroups,
+	sectionAuthorizedOps, sectionBrokerRPC,
 }
 
 func TestFinalizeEmitsEverySectionEvenWhenSkipped(t *testing.T) {

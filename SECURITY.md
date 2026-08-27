@@ -40,13 +40,15 @@ production Kafka cluster usually wants first. These are design invariants, not
 current behaviour that may drift — a change that breaks one of them is a
 product decision, not an implementation detail.
 
-**Kafka permissions.** The agent requires **exactly** three grants:
+**Kafka permissions.** The agent requires **exactly** five read-only grants:
 
 | Resource | Operation | Used for |
 |---|---|---|
 | `CLUSTER` | `DESCRIBE` | `Metadata` (brokers, controller, cluster ID), `ListGroups`, `ApiVersions`, and `DescribeLogDirs` when `COLLECT_LOG_DIRS` is enabled |
 | `TOPIC` | `DESCRIBE` | Topic and partition metadata, `ListOffsets` (log start, high watermark, and the `read_committed` listing that yields the last stable offset), and the topics inside `OffsetFetch` |
 | `GROUP` | `DESCRIBE` | `DescribeGroups` and `OffsetFetch` |
+| `TOPIC` | `DESCRIBE_CONFIGS` | `DescribeConfigs` for topic configuration (`COLLECT_CONFIGS`, default on) |
+| `CLUSTER` | `DESCRIBE_CONFIGS` | `DescribeConfigs` for broker configuration |
 
 Every call the agent makes falls inside those three grants. `ListOffsets` carries an
 isolation level that the broker applies only *after* authorization, so reading the last
@@ -59,13 +61,32 @@ non-permissive authorizer. `OffsetForLeaderEpoch` is satisfied by the existing g
 `DescribeProducers` requires `READ` on `TOPIC` and is therefore **excluded from this
 agent by design**, because `READ` on a topic would permit consuming its records.
 
+`DESCRIBE_CONFIGS` is the one grant outside the original three DESCRIBE grants. It is
+read-only and it is **not** `ALTER_CONFIGS`: it permits reading configuration, never
+changing it. It is required rather than optional because what it reads is a correction, not
+a feature — see below. A cluster that refuses it can run the agent with
+`COLLECT_CONFIGS=false`; the two config sections then report `unauthorized` and no other
+section is affected. The agent requests a fixed allowlist of 21 keys, and it never ships a value the broker
+marks `SENSITIVE` — Kafka strips those server-side, and the agent strips them again on the
+way out rather than trusting that it always will. Every listener, SASL, SSL and path-shaped
+key is excluded from the allowlist, because the agent has no consumer for any of them.
+
+The reason it is required: without `cleanup.policy` nothing can tell that a topic is
+compacted, and on a compacted topic the offset range is not a record count — compaction
+removes records and leaves the offsets consumed. Consumer lag, the headline number this
+agent produces, is then overstated by an unknowable amount and cannot even be flagged as
+unreliable. Without `min.insync.replicas` an under-replicated partition cannot be
+distinguished from one where every `acks=all` produce is currently failing: same wire data,
+opposite severity.
+
 Nothing else. In particular:
 
 - **It never reads record data.** No `READ` on any topic, no consumer, no
   `Fetch` request is ever issued. It cannot see the contents of your messages,
   because the credentials it runs with are not permitted to.
 - **It never writes to the cluster.** No `WRITE`, `CREATE`, `DELETE`, `ALTER`,
-  or `ALTER_CONFIGS` on any resource. It cannot create, modify, or delete a
+  or `ALTER_CONFIGS` on any resource. `DESCRIBE_CONFIGS` reads configuration;
+  `ALTER_CONFIGS` would change it, and is never requested. It cannot create, modify, or delete a
   topic, a group, a config, or an ACL. It does not commit offsets and does not
   join a consumer group.
 - **It is not an admin tool.** No `CLUSTER_ACTION`, no `IDEMPOTENT_WRITE`, no

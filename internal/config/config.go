@@ -86,6 +86,43 @@ const (
 	// DefaultAuthorizedOpsEvery samples once per ten cycles. Grants change on
 	// human timescales, while the request is O(partitions) of the selected topics.
 	DefaultAuthorizedOpsEvery = 10
+	// DefaultCollectConfigs is ON, and it is the only collector that needs an
+	// ACL outside DESCRIBE on CLUSTER/TOPIC/GROUP. It defaults on anyway,
+	// because what it collects is a CORRECTION rather than a feature.
+	//
+	// Without cleanup.policy nothing can tell that a topic is compacted, and on
+	// a compacted topic the offset range is not a record count: compaction
+	// removes records and leaves the offsets consumed, so end_offset minus
+	// committed_offset counts gaps that hold nothing. Consumer lag -- the
+	// headline number this agent exists to produce -- is then overstated by an
+	// unknowable amount, and cannot even be flagged as unreliable. Defaulting
+	// this off would mean the default build ships that wrong number.
+	//
+	// Missing the grant is not fatal and never blocks a cycle: the two sections
+	// report `unauthorized`, every other section is unaffected, and the
+	// authorized_operations self-diagnostic names the exact grant to add.
+	DefaultCollectConfigs = true
+	// DefaultConfigsEvery samples once per sixty cycles, the slowest cadence in
+	// the agent. Configs change when a human changes them.
+	DefaultConfigsEvery = 60
+
+	// DefaultCollectMaxTimestamp is ON. One extra ListOffsets fan-out, no new
+	// ACL, and it replaces an inference with a measurement: topic liveness is
+	// otherwise guessed from a run of zero end-offset deltas, which cannot tell
+	// a silent topic from a missed cycle.
+	DefaultCollectMaxTimestamp = true
+	// DefaultCollectTieredOffsets is OFF. On a cluster without remote storage
+	// the local log start is always equal to the log start already collected, so
+	// it is a round trip per cycle for a duplicate answer.
+	DefaultCollectTieredOffsets = false
+	// DefaultCollectLatestTiered is ON, but it is subordinate: it is ignored
+	// unless COLLECT_TIERED_OFFSETS is also set. Separate because KIP-1005
+	// (Kafka 3.9) landed five releases after KIP-405 (3.4), so a 3.4-3.8 cluster
+	// serves the local start and not the remote end.
+	DefaultCollectLatestTiered = true
+	// DefaultCollectShareGroups is OFF. KIP-932 needs Kafka 4.0, and the phase
+	// has never been exercised against a broker that can answer it.
+	DefaultCollectShareGroups = false
 
 	// DefaultCollectReassignments is ON: the request is issued only when a URP is
 	// observed, so it costs nothing in steady state and is the difference between
@@ -219,6 +256,12 @@ type Config struct {
 	ThroughputWindowEvery   int
 	CollectAuthorizedOps    bool
 	AuthorizedOpsEvery      int
+	CollectConfigs          bool
+	ConfigsEvery            int
+	CollectMaxTimestamp     bool
+	CollectTieredOffsets    bool
+	CollectLatestTiered     bool
+	CollectShareGroups      bool
 	CollectReassignments    bool
 	CollectEpochProbes      bool
 	CollectRPCStats         bool
@@ -378,6 +421,15 @@ func Load() (*Config, error) {
 	c.AuthorizedOpsEvery = p.integer("AUTHORIZED_OPS_EVERY", DefaultAuthorizedOpsEvery)
 	if c.AuthorizedOpsEvery < 1 {
 		p.errf("AUTHORIZED_OPS_EVERY must be >= 1 (1 = every cycle), got %d", c.AuthorizedOpsEvery)
+	}
+	c.CollectMaxTimestamp = p.boolean("COLLECT_MAX_TIMESTAMP", DefaultCollectMaxTimestamp)
+	c.CollectTieredOffsets = p.boolean("COLLECT_TIERED_OFFSETS", DefaultCollectTieredOffsets)
+	c.CollectLatestTiered = p.boolean("COLLECT_LATEST_TIERED", DefaultCollectLatestTiered)
+	c.CollectShareGroups = p.boolean("COLLECT_SHARE_GROUPS", DefaultCollectShareGroups)
+	c.CollectConfigs = p.boolean("COLLECT_CONFIGS", DefaultCollectConfigs)
+	c.ConfigsEvery = p.integer("CONFIGS_EVERY", DefaultConfigsEvery)
+	if c.ConfigsEvery < 1 {
+		p.errf("CONFIGS_EVERY must be >= 1 (1 = every cycle), got %d", c.ConfigsEvery)
 	}
 
 	c.CollectReassignments = p.boolean("COLLECT_REASSIGNMENTS", DefaultCollectReassignments)
