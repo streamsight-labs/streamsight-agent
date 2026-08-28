@@ -71,15 +71,36 @@ data:
   LOG_DIRS_EVERY: {{ . | int | quote }}
   {{- end }}
   {{- end }}
-  {{- with .Values.collection.maxTimestampEvery }}
-  MAX_TIMESTAMP_EVERY: {{ . | int | quote }}
-  {{- end }}
   COLLECT_CONFIGS: {{ .Values.collection.collectConfigs | quote }}
   {{- if .Values.collection.collectConfigs }}
   {{- with .Values.collection.configsEvery }}
   CONFIGS_EVERY: {{ . | int | quote }}
   {{- end }}
   {{- end }}
+  COLLECT_CONSUMER_GROUPS: {{ .Values.collection.collectConsumerGroups | quote }}
+  COLLECT_MAX_TIMESTAMP: {{ .Values.collection.collectMaxTimestamp | quote }}
+  {{- if .Values.collection.collectMaxTimestamp }}
+  {{- with .Values.collection.maxTimestampEvery }}
+  MAX_TIMESTAMP_EVERY: {{ . | int | quote }}
+  {{- end }}
+  {{- end }}
+  COLLECT_THROUGHPUT_WINDOW: {{ .Values.collection.collectThroughputWindow | quote }}
+  {{- if .Values.collection.collectThroughputWindow }}
+  {{- with .Values.collection.throughputWindow }}
+  THROUGHPUT_WINDOW: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.collection.throughputWindowEvery }}
+  THROUGHPUT_WINDOW_EVERY: {{ . | int | quote }}
+  {{- end }}
+  {{- end }}
+  COLLECT_TIERED_OFFSETS: {{ .Values.collection.collectTieredOffsets | quote }}
+  {{- if .Values.collection.collectTieredOffsets }}
+  COLLECT_LATEST_TIERED: {{ .Values.collection.collectLatestTiered | quote }}
+  {{- end }}
+  COLLECT_SHARE_GROUPS: {{ .Values.collection.collectShareGroups | quote }}
+  COLLECT_REASSIGNMENTS: {{ .Values.collection.collectReassignments | quote }}
+  COLLECT_EPOCH_PROBES: {{ .Values.collection.collectEpochProbes | quote }}
+  COLLECT_RPC_STATS: {{ .Values.collection.collectRpcStats | quote }}
 
   # -- Cardinality caps ---------------------------------------------------
   # Only the caps that are set are rendered: the agent's own default for an

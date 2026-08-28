@@ -191,6 +191,72 @@ collection:
   # true.
   configsEvery: ""
 
+  # COLLECT_CONSUMER_GROUPS -- describes new-protocol (KIP-848) groups via
+  # ConsumerGroupDescribe, alongside the classic DescribeGroups that stays
+  # authoritative. On by default and free on an older cluster: the startup
+  # probe disables it below Kafka 4.0 rather than erroring every cycle.
+  collectConsumerGroups: true
+
+  # COLLECT_MAX_TIMESTAMP -- adds partitions[].max_timestamp, the broker's own
+  # answer to "when was the last record written". On by default; see
+  # maxTimestampEvery above for why it is cadenced rather than per-cycle.
+  collectMaxTimestamp: true
+
+  # COLLECT_THROUGHPUT_WINDOW -- adds partitions[].window, an offset plus the
+  # broker's timestamp for it, so a backend gets a server-measured record count
+  # over a known span instead of differencing two batches. OFF by default: it
+  # is an extra ListOffsets fan-out per cycle, and a backend that keeps history
+  # can already difference consecutive batches.
+  collectThroughputWindow: false
+  # THROUGHPUT_WINDOW -- how far back the window reaches. Empty uses the agent
+  # default, currently 5m. Rendered only when collectThroughputWindow is true.
+  # A window narrower than the collection interval buys nothing and warns.
+  throughputWindow: ""
+  # THROUGHPUT_WINDOW_EVERY -- run it every Nth cycle. Must be >= 1. Empty uses
+  # the agent default, currently 1 (every cycle).
+  throughputWindowEvery: ""
+
+  # COLLECT_TIERED_OFFSETS -- adds tiered.local_start_offset (KIP-405): the
+  # earliest offset actually on broker disk, as opposed to start_offset which
+  # on a tiered cluster includes remote storage. OFF by default because on a
+  # cluster without remote storage it costs a round trip to return the same
+  # answer as start_offset. Needs Kafka 3.4+.
+  collectTieredOffsets: false
+  # COLLECT_LATEST_TIERED -- additionally asks for tiered.remote_end_offset
+  # (KIP-1005). SUBORDINATE: ignored unless collectTieredOffsets is also true.
+  # Gated separately because KIP-1005 landed five releases after KIP-405, so a
+  # 3.4-3.8 cluster serves one and not the other. Needs Kafka 3.9+.
+  collectLatestTiered: true
+
+  # COLLECT_SHARE_GROUPS -- adds the share_groups[] section (KIP-932). Share
+  # groups are not consumer groups under another name: members share partitions
+  # and acknowledge individual records, so there is no committed offset per
+  # partition and no lag in the committed-versus-end sense. OFF by default and
+  # needs Kafka 4.0+.
+  collectShareGroups: false
+
+  # COLLECT_REASSIGNMENTS -- adds reassignments[]. On by default and nearly
+  # free: the ListPartitionReassignments request is issued only on a cycle that
+  # already observed an under-replicated partition, so a healthy cluster pays
+  # nothing. Lets URP alerting subtract partitions that are moving on purpose.
+  collectReassignments: true
+
+  # COLLECT_EPOCH_PROBES -- adds epoch_probes[]. On by default for the same
+  # reason: OffsetForLeaderEpoch is issued only when a committed leader epoch
+  # disagrees with the partition's current one, and each distinct question is
+  # asked once per process lifetime.
+  collectEpochProbes: true
+
+  # COLLECT_RPC_STATS -- adds the agent.rpc section: per-broker, per-API-key
+  # request counts, bytes and latency histograms, as raw counters over a window
+  # rather than rates or percentiles. On by default because it issues NO extra
+  # requests -- the counters come from kgo hooks on traffic already happening.
+  #
+  # It is, however, the switch that costs PAYLOAD: the section grows with
+  # brokers x API keys and has no cap of its own. Measured at 4% of the batch on
+  # a 3-broker cluster; on a large fleet, check batch bytes before leaving it on.
+  collectRpcStats: true
+
 # Cardinality caps: hard ceilings on what one batch may contain.
 #
 # Every ENTITY cap defaults to 0 = unlimited, and that is deliberate -- a
