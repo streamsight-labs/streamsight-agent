@@ -56,14 +56,25 @@ type probedEpochs struct {
 	seen map[epochProbeKey]struct{}
 }
 
-// suppress reports whether this question was already answered, and records it
-// when it was not.
-func (p *probedEpochs) suppress(k epochProbeKey) bool {
+// answered reports whether a leader has already answered this question.
+//
+// It records NOTHING. The read and the write are separate on purpose: a
+// question is only settled once a leader has answered it, and recording at ask
+// time would retire a question the agent asked and got nothing back from. The
+// write is remember, below, and it runs after the response.
+func (p *probedEpochs) answered(k epochProbeKey) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if _, ok := p.seen[k]; ok {
-		return true
-	}
+	_, ok := p.seen[k]
+	return ok
+}
+
+// remember retires a question a leader answered, so later cycles stop asking.
+// Idempotent: two groups mismatching identically on one partition ask one
+// question and both record it.
+func (p *probedEpochs) remember(k epochProbeKey) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if len(p.seen) >= maxProbedEpochs {
 		p.seen = nil
 	}
@@ -71,7 +82,6 @@ func (p *probedEpochs) suppress(k epochProbeKey) bool {
 		p.seen = make(map[epochProbeKey]struct{}, 64)
 	}
 	p.seen[k] = struct{}{}
-	return false
 }
 
 // errEpochNotReturned is the tell for a partition the request named and the
@@ -110,12 +120,14 @@ func (c *Collector) collectEpochProbes(ctx context.Context, run bool, topics []m
 	if dropped {
 		sec.truncated = true
 	}
-	// Drop the questions already answered in an earlier cycle. Without this the
-	// phase re-asks about every idle partition after any leader election, for as
-	// long as the group's offsets are retained.
+	// Drop the questions a leader already answered in an earlier cycle. Without
+	// this the phase re-asks about every idle partition after any leader
+	// election, for as long as the group's offsets are retained. This is a READ:
+	// the matching write happens after the response, so a question that goes
+	// unasked or unanswered survives to the next cycle.
 	fresh := triggers[:0]
 	for _, t := range triggers {
-		if !c.probed.suppress(t.probeKey()) {
+		if !c.probed.answered(t.probeKey()) {
 			fresh = append(fresh, t)
 		}
 	}
@@ -148,9 +160,15 @@ func (c *Collector) collectEpochProbes(ctx context.Context, run bool, topics []m
 	probes := make([]metrics.EpochProbe, 0, len(triggers))
 	for _, t := range triggers {
 		// A trigger the round cap refused was never asked, so it gets no row:
-		// an empty probe would read as "the leader had nothing to say".
-		if a, ok := asked[t.key()]; ok {
-			probes = append(probes, t.probe(sec, a))
+		// an empty probe would read as "the leader had nothing to say". It is
+		// also not remembered — it is still an open question.
+		a, ok := asked[t.key()]
+		if !ok {
+			continue
+		}
+		probes = append(probes, t.probe(sec, a))
+		if a.settles() {
+			c.probed.remember(t.probeKey())
 		}
 	}
 	return probes, sec
@@ -162,6 +180,23 @@ type epochAnswer struct {
 	offset kadm.OffsetForLeaderEpoch
 	found  bool
 	usable bool
+}
+
+// settles reports whether this answer retires the question for good.
+//
+// Only a leader that answered THIS partition without a partition-level error
+// does. The three cases it excludes — the request failed, the response omitted
+// the partition, the leader returned an error code — are exactly what a leader
+// election in flight produces, which is the one moment this phase must not go
+// blind. Note a LeaderEpoch of -1 DOES settle: "I do not know that epoch" is an
+// answer, and re-asking cannot change it.
+//
+// The asymmetry is deliberate. Re-asking costs one request on a later cycle;
+// retiring a question the leader never answered costs the only positive proof
+// of truncation the agent can obtain, permanently, because the mismatch that
+// triggers it does not resolve on its own — see probedEpochs.
+func (a epochAnswer) settles() bool {
+	return a.usable && a.found && a.offset.Err == nil
 }
 
 // epochKey identifies one question: an epoch asked about for one partition.

@@ -58,16 +58,23 @@ const (
 // a configuration, and demoting them would forfeit the ordering assertion.
 //
 // DefaultOptionalSections holds names that may be absent and whose position is
-// not asserted. Both are Config fields rather than constants because
-// internal/collector's section names are unexported and new sections keep
-// arriving; an unknown name warns once instead of failing.
+// not asserted. Both are Config fields rather than constants because new
+// sections keep arriving and an ingest may be running against an agent either
+// side of one; an unknown name warns once instead of failing.
+//
+// DefaultSections is still spelled out here rather than taken from
+// collector.SectionNames() at run time, so the server keeps no Kafka client in
+// its import graph — but it is no longer unbound: sections_test.go asserts the
+// two are equal element for element. It drifted once without that assertion.
 var (
 	DefaultSections = []string{
 		"cluster",
 		"topics", "topics_window", "topics_lso", "topics_end",
+		"topics_max_timestamp", "topics_local_start", "topics_remote_end",
 		"groups", "offsets",
-		"group_states", "epoch_probes",
-		"log_dirs", "reassignments", "broker_rpc",
+		"epoch_probes",
+		"log_dirs", "reassignments", "topic_configs", "broker_configs",
+		"share_groups", "broker_rpc",
 	}
 	DefaultOptionalSections = []string{}
 )

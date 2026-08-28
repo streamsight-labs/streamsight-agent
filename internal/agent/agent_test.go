@@ -332,29 +332,17 @@ func TestCollectorOptionsCarryEveryConfiguredSetting(t *testing.T) {
 		CollectReassignments:    true,
 		CollectEpochProbes:      true,
 		CollectRPCStats:         true,
-		CollectGroupStates:      true,
-		GroupStatePollInterval:  2 * time.Second,
 
-		MaxErrors:              11,
-		MaxErrorSamples:        2,
-		MaxTopics:              3,
-		MaxPartitionsPerTopic:  4,
-		MaxGroups:              5,
-		MaxMembersPerGroup:     6,
-		MaxOffsetsPerGroup:     8,
-		MaxTransitionsPerGroup: 12,
+		MaxErrors:             11,
+		MaxErrorSamples:       2,
+		MaxTopics:             3,
+		MaxPartitionsPerTopic: 4,
+		MaxGroups:             5,
+		MaxMembersPerGroup:    6,
+		MaxOffsetsPerGroup:    8,
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	// The watcher is the one option that is an object rather than a value; it is
-	// still built from config, so the sweep below must see it.
-	watcher, err := newGroupStateWatcher(cfg, logger, nil, nil)
-	if err != nil {
-		t.Fatalf("newGroupStateWatcher: %v", err)
-	}
-	if watcher == nil {
-		t.Fatal("COLLECT_GROUP_STATES is set, so a watcher must have been built")
-	}
-	opts := collectorOptions(cfg, logger, watcher)
+	opts := collectorOptions(cfg, logger)
 
 	if !reflect.DeepEqual(opts.GroupStates, cfg.GroupStates) {
 		t.Errorf("GroupStates = %v, want %v", opts.GroupStates, cfg.GroupStates)

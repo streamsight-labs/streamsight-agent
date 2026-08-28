@@ -55,11 +55,6 @@ type Batch struct {
 	// URP is observed. Absence is NOT proof that nothing is moving.
 	Reassignments []Reassignment `json:"reassignments,omitempty"`
 
-	// GroupStates is the fast-poll group-state observation window. It is attached
-	// to the next full batch rather than shipped as its own batch, so "one batch
-	// per collection interval" still holds.
-	GroupStates *GroupStateWatch `json:"group_states,omitempty"`
-
 	// EpochProbes are OffsetForLeaderEpoch results. Normally absent entirely: the
 	// probe fires only on a committed-vs-current leader-epoch mismatch.
 	EpochProbes []EpochProbe `json:"epoch_probes,omitempty"`
@@ -109,10 +104,6 @@ type Truncation struct {
 	Groups     int `json:"groups,omitempty"`
 	Members    int `json:"members,omitempty"`
 	Offsets    int `json:"offsets,omitempty"`
-	// GroupStateTransitions is fast-poll transitions dropped by a cap. The
-	// per-state counts in GroupStateWindow.States stay true, so a dwell
-	// distribution is short but a rebalance count is not.
-	GroupStateTransitions int `json:"group_state_transitions,omitempty"`
 	// ErrorsCollapsed is occurrences folded into an existing entry's Count by
 	// deduplication. Nothing is lost: the total survives in Count.
 	ErrorsCollapsed int `json:"errors_collapsed,omitempty"`
@@ -127,7 +118,6 @@ func (t *Truncation) Add(o Truncation) {
 	t.Groups += o.Groups
 	t.Members += o.Members
 	t.Offsets += o.Offsets
-	t.GroupStateTransitions += o.GroupStateTransitions
 	t.ErrorsCollapsed += o.ErrorsCollapsed
 	t.ErrorsDropped += o.ErrorsDropped
 }
@@ -142,10 +132,6 @@ type Limits struct {
 	MaxGroups             int `json:"max_groups,omitempty"`
 	MaxMembersPerGroup    int `json:"max_members_per_group,omitempty"`
 	MaxOffsetsPerGroup    int `json:"max_offsets_per_group,omitempty"`
-	// MaxTransitionsPerGroup caps the fast poll's per-group transition list. A
-	// rebalance storm is exactly when that list is longest and exactly when the
-	// signal matters, so a cap here trades dwell samples for a bounded batch.
-	MaxTransitionsPerGroup int `json:"max_transitions_per_group,omitempty"`
 }
 
 // SectionStatus is a CLOSED enum in schema version 1: a v1 consumer may switch
@@ -386,9 +372,6 @@ const (
 	CapabilityLastStableOffset = "last_stable_offset"
 	// CapabilityGroupStateFilter is ListGroups v4+ (the StatesFilter field).
 	CapabilityGroupStateFilter = "group_state_filter"
-	// CapabilityGroupState is ListGroups v1+, where the response first carried
-	// State. Below it every fast-poll observation has an empty state.
-	CapabilityGroupState = "group_state"
 	// CapabilityConsumerGroupDescribe is the KIP-848 ConsumerGroupDescribe key.
 	CapabilityConsumerGroupDescribe = "consumer_group_describe"
 	// CapabilityLogDirs is DescribeLogDirs v3+, the first version with a top-level
@@ -614,83 +597,6 @@ type Reassignment struct {
 	Replicas         []int32 `json:"replicas"`
 	AddingReplicas   []int32 `json:"adding_replicas"`
 	RemovingReplicas []int32 `json:"removing_replicas"`
-}
-
-// GroupStateWatch is one window of fast-poll group-state observations, attached
-// to the next full batch.
-//
-// It ships RAW OBSERVATIONS, not a percentile. The roadmap asks for
-// "time-in-PreparingRebalance p99", and the agent deliberately does not compute
-// it: percentiles do not aggregate across windows or agents, a per-window p99
-// over a handful of rebalances is meaningless, and the agent's whole stance is
-// that derivation belongs at the backend where the history lives. Transitions
-// plus per-state counts are strictly more information than any statistic derived
-// from them.
-type GroupStateWatch struct {
-	WindowStart time.Time `json:"window_start"`
-	WindowEnd   time.Time `json:"window_end"`
-	// PollIntervalMs is the configured fast-poll cadence. It is the resolution
-	// floor: no dwell shorter than this is observable, so a zero-length
-	// PreparingRebalance means "shorter than the poll", never "instant".
-	PollIntervalMs int64 `json:"poll_interval_ms"`
-	// Polls is how many polls completed, MissedPolls how many were skipped or
-	// failed. Dwell totals are understated by exactly the missed span, so a window
-	// with MissedPolls > 0 must not be aggregated as if it were continuous.
-	Polls       int `json:"polls"`
-	MissedPolls int `json:"missed_polls"`
-	// Groups is sorted by GroupID and contains only groups that were observed at
-	// least once in the window.
-	Groups []GroupStateWindow `json:"groups"`
-}
-
-// GroupStateWindow is one group's observed state over the watch window.
-type GroupStateWindow struct {
-	GroupID     string `json:"group_id"`
-	Coordinator int32  `json:"coordinator"`
-	// StateAtStart is the state at the first poll of the window and StateAtEnd at
-	// the last; both are empty on a broker below Kafka 2.6, which does not
-	// populate State in ListGroups. Empty is "not reported", never a state name.
-	StateAtStart string `json:"state_at_start"`
-	StateAtEnd   string `json:"state_at_end"`
-
-	// Transitions are observed state changes in time order. Timestamps are when
-	// the AGENT SAW the change, so each is late by up to PollIntervalMs and a
-	// transition pair that both fell between two polls is invisible.
-	Transitions []GroupStateTransition `json:"transitions"`
-	// TransitionCount is the pre-cap count and stays TRUE when the list is
-	// truncated, so len(Transitions) < TransitionCount is self-describing.
-	TransitionCount int `json:"transition_count"`
-
-	// States is per-state occupancy over the window, sorted by state name. It
-	// survives truncation of Transitions.
-	States []GroupStateDwell `json:"states"`
-}
-
-// GroupStateTransition is one observed state change. From is empty when the
-// group was first seen in this window, which is not a transition from nothing —
-// the group may have held that state for hours.
-type GroupStateTransition struct {
-	At   time.Time `json:"at"`
-	From string    `json:"from"`
-	To   string    `json:"to"`
-}
-
-// GroupStateDwell is how long one group spent in one state during the window.
-type GroupStateDwell struct {
-	State string `json:"state"`
-	// Entries is how many times the state was entered, Completed how many of
-	// those also ended inside the window. Only completed intervals have a true
-	// duration; the backend builds its dwell distribution from those.
-	Entries   int `json:"entries"`
-	Completed int `json:"completed"`
-	// ObservedMs is total time seen in this state, INCLUDING any interval still
-	// open at the window edge. That part is right-censored: it is a lower bound on
-	// a dwell, and treating it as a completed sample biases every percentile down.
-	ObservedMs int64 `json:"observed_ms"`
-	// CompletedMs is the duration of each completed interval, in observation
-	// order — the raw samples a percentile is computed from. Empty when Completed
-	// is 0.
-	CompletedMs []int64 `json:"completed_ms"`
 }
 
 // EpochProbe is one OffsetForLeaderEpoch result: positive proof of truncation,

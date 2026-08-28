@@ -63,18 +63,33 @@ const (
 	// an older cluster pays one ApiVersions round trip rather than a failing
 	// request every cycle.
 	DefaultCollectConsumerGroups = true
-	// DefaultCollectLogDirs is OFF: the response is O(replicas), the largest
-	// payload the agent can emit, and the section has never been run against
-	// more than a single broker. Turn it on with MAX_TOPICS /
-	// MAX_PARTITIONS_PER_TOPIC sized for the cluster.
-	DefaultCollectLogDirs = false
-	// DefaultLogDirsEvery samples log dirs once per ten cycles (five minutes at
-	// the default interval). Disks fill over hours, so an O(replicas) response
-	// every 30 seconds buys nothing.
+	// DefaultCollectLogDirs is ON. It is the only source of per-replica disk
+	// bytes, and every storage question the product answers rests on it:
+	// days-to-full per log dir, per-topic storage chargeback, follower lag in
+	// bytes without JMX, JBOD imbalance, and the average record size that turns
+	// every record rate in the product into a byte rate.
+	//
+	// The response is O(replicas) and is the largest section the agent emits,
+	// which is what DefaultLogDirsEvery is for rather than a reason to leave the
+	// data uncollected: at that cadence the section is absent from 96% of
+	// batches, and it costs ~4 KB gzipped on the cycles it RUNS, which is ~166 B
+	// per cycle amortised at LOG_DIRS_EVERY=24 (docs/ARCHITECTURE.md Open
+	// item 1 -- do not restate a number from it here without re-reading it).
+	// It needs no ACL beyond the DESCRIBE on CLUSTER the agent already requires.
+	//
+	// Two things to know before sizing a large cluster. The figures describe the
+	// VOLUME, not the directory, so two log dirs on one mount report identical
+	// totals -- group by (broker, total_bytes, usable_bytes) before summing. And
+	// MAX_PARTITIONS_PER_TOPIC does shrink this request, unlike the offset
+	// listings, because the log-dir request names partitions explicitly.
+	DefaultCollectLogDirs = true
 	// DefaultLogDirsEvery samples once every two minutes at the 5s interval.
-	// MEASURED: the section is ~70 B per replica, so on a 350-partition RF-3
-	// cluster it is ~73 KB against a ~34 KB batch -- it TRIPLES the payload on
-	// the cycles it runs. Disks fill over hours, so 720 samples a day is ample
+	//
+	// MEASURED at 1,170 replicas (390 partitions RF 3) -- docs/ARCHITECTURE.md
+	// Open item 1, which is where these figures are maintained and must be
+	// re-read rather than re-derived here: the section is 77.0 B per replica, so
+	// it is ~90 KB against a ~174 KB steady batch -- it adds ~52% to the payload
+	// on the cycles it runs. Disks fill over hours, so 720 samples a day is ample
 	// for a days-to-full forecast, and it keeps the largest section off 96% of
 	// batches. Offline-disk detection does not depend on this cadence: a dead
 	// replica also shows in partitions[].offline_replicas every cycle.
@@ -86,10 +101,14 @@ const (
 	// input that survives an agent restart, but a backend that never misses a
 	// cycle can difference two batches instead.
 	DefaultCollectThroughputWindow = false
-	// DefaultThroughputWindow is ten times the default interval. The phase earns
-	// its cost only when the window is WIDER than COLLECTION_INTERVAL — inside one
-	// interval the backend can already difference two batches — and five minutes
-	// is the right denominator for a burn-down ETA.
+	// DefaultThroughputWindow is sixty times the default interval. It was ten
+	// times when the interval was 30s and it deliberately did not move when the
+	// interval did: unlike every _EVERY knob this is a WALL-CLOCK width, not a
+	// cycle count, so the sampling cadence does not change what it means. The
+	// phase earns its cost only when the window is WIDER than COLLECTION_INTERVAL
+	// — inside one interval the backend can already difference two batches — and
+	// five minutes is the right denominator for a burn-down ETA however often the
+	// agent samples.
 	DefaultThroughputWindow = 5 * time.Minute
 	// DefaultThroughputWindowEvery is every cycle: an operator who opted in wants
 	// a rate on every batch. The knob exists for wide clusters.
@@ -108,11 +127,11 @@ const (
 	// this off would mean the default build ships that wrong number.
 	//
 	// Missing the grant is not fatal and never blocks a cycle: the two sections
-	// report `unauthorized`, every other section is unaffected, and the
-	// authorized_operations self-diagnostic names the exact grant to add.
+	// report `unauthorized` and every other section is unaffected. The grant to
+	// add is DESCRIBE_CONFIGS on TOPIC and on CLUSTER respectively -- the two
+	// sections are separate precisely so a principal holding one and not the
+	// other sees which.
 	DefaultCollectConfigs = true
-	// DefaultConfigsEvery samples once per sixty cycles, the slowest cadence in
-	// the agent. Configs change when a human changes them.
 	// DefaultConfigsEvery samples once every thirty minutes at the 5s interval,
 	// the slowest cadence in the agent. Configs change when a human changes them.
 	DefaultConfigsEvery = 360
@@ -149,22 +168,6 @@ const (
 	// hooks on requests the agent already sends, so the section costs no request
 	// and no ACL.
 	DefaultCollectRPCStats = true
-
-	// DefaultCollectGroupStates is OFF: unlike every other phase it is a SECOND
-	// ticker, one sharded ListGroups per tick — B requests per tick, 6×B per
-	// 30s interval at the default cadence — which is a cost an operator must opt
-	// into rather than inherit.
-	DefaultCollectGroupStates = false
-	// DefaultGroupStatePollInterval is the fast tick. A PreparingRebalance
-	// shorter than this is invisible, which is why it is far below the collection
-	// interval; the collector floors it at one second.
-	DefaultGroupStatePollInterval = 5 * time.Second
-	// DefaultMaxTransitionsPerGroup bounds the per-group transition list the fast
-	// poll accumulates between cycles. Unlike the entity caps this one has a
-	// positive default: a rebalance storm is exactly when the list is longest, so
-	// unbounded here means an unbounded batch during the incident it exists to
-	// describe.
-	DefaultMaxTransitionsPerGroup = 256
 
 	// DefaultMaxErrors is the one cap that defaults ON. Behind deduplication
 	// errors[] is already bounded by the number of distinct failure modes, so
@@ -274,11 +277,6 @@ type Config struct {
 	CollectReassignments    bool
 	CollectEpochProbes      bool
 	CollectRPCStats         bool
-	// CollectGroupStates runs a second, faster ticker than the collection loop;
-	// its window is drained onto the next batch. GroupStatePollInterval is its
-	// tick, and the only setting here that costs requests between cycles.
-	CollectGroupStates     bool
-	GroupStatePollInterval time.Duration
 
 	// Cardinality caps. Zero means unlimited for every entity cap; MaxErrors and
 	// MaxErrorSamples always have a positive default. They cap the batch, not
@@ -290,9 +288,6 @@ type Config struct {
 	MaxGroups             int
 	MaxMembersPerGroup    int
 	MaxOffsetsPerGroup    int
-	// MaxTransitionsPerGroup caps the fast poll's per-group transition list. It
-	// is the one cap with a positive default; see DefaultMaxTransitionsPerGroup.
-	MaxTransitionsPerGroup int
 
 	LogLevel        string
 	AgentInstanceID string
@@ -445,15 +440,6 @@ func Load() (*Config, error) {
 	c.CollectEpochProbes = p.boolean("COLLECT_EPOCH_PROBES", DefaultCollectEpochProbes)
 	c.CollectRPCStats = p.boolean("COLLECT_RPC_STATS", DefaultCollectRPCStats)
 
-	c.CollectGroupStates = p.boolean("COLLECT_GROUP_STATES", DefaultCollectGroupStates)
-	c.GroupStatePollInterval = p.duration("GROUP_STATE_POLL_INTERVAL", DefaultGroupStatePollInterval)
-	if c.GroupStatePollInterval <= 0 {
-		// time.NewTicker panics on a non-positive duration, as with
-		// COLLECTION_INTERVAL. A tick below the collector's one-second floor is
-		// legal and clamped, so it warns rather than fails.
-		p.errf("GROUP_STATE_POLL_INTERVAL must be > 0, got %s", c.GroupStatePollInterval)
-	}
-
 	// A negative cap has no meaning, unlike EXPORT_FILE_MAX_MB where it disables
 	// rotation.
 	c.MaxErrors = p.integer("MAX_ERRORS", DefaultMaxErrors)
@@ -480,11 +466,6 @@ func Load() (*Config, error) {
 		if *lim.dst < 0 {
 			p.errf("%s must be >= 0 (0 = unlimited), got %d", lim.key, *lim.dst)
 		}
-	}
-	// Not in the loop above: it is the one cap whose default is not unlimited.
-	c.MaxTransitionsPerGroup = p.integer("MAX_TRANSITIONS_PER_GROUP", DefaultMaxTransitionsPerGroup)
-	if c.MaxTransitionsPerGroup < 0 {
-		p.errf("MAX_TRANSITIONS_PER_GROUP must be >= 0 (0 = unlimited), got %d", c.MaxTransitionsPerGroup)
 	}
 
 	c.LogLevel = strings.ToLower(strings.TrimSpace(p.str("LOG_LEVEL", DefaultLogLevel)))
@@ -579,19 +560,6 @@ func (c *Config) Warnings() []string {
 		w = append(w, fmt.Sprintf("THROUGHPUT_WINDOW (%s) is narrower than COLLECTION_INTERVAL (%s): a backend can already difference two batches over that span, so the extra ListOffsets fan-out buys nothing",
 			c.ThroughputWindow, c.CollectionInterval))
 	}
-	if c.CollectGroupStates {
-		// The only phase whose cost is not paid per cycle: it is a second ticker,
-		// so the request count scales with brokers × ticks, not with the batch.
-		w = append(w, fmt.Sprintf("COLLECT_GROUP_STATES=true polls ListGroups every %s: one request PER BROKER per tick, independent of COLLECTION_INTERVAL (%s)",
-			c.GroupStatePollInterval, c.CollectionInterval))
-		if c.GroupStatePollInterval >= c.CollectionInterval {
-			w = append(w, fmt.Sprintf("GROUP_STATE_POLL_INTERVAL (%s) is not below COLLECTION_INTERVAL (%s): the fast poll can see no transition the collection cycle would have missed",
-				c.GroupStatePollInterval, c.CollectionInterval))
-		}
-		if c.MaxTransitionsPerGroup == 0 {
-			w = append(w, "MAX_TRANSITIONS_PER_GROUP=0 leaves the fast poll's per-group transition list unbounded, which is worst during the rebalance storm it exists to describe")
-		}
-	}
 	return w
 }
 
@@ -639,7 +607,13 @@ func (c *Config) Redacted() string {
 	fmt.Fprintf(&b, " topic_include=%s topic_exclude=%s group_include=%s group_exclude=%s",
 		orNone(c.TopicIncludeRegex), orNone(c.TopicExcludeRegex), orNone(c.GroupIncludeRegex), orNone(c.GroupExcludeRegex))
 	fmt.Fprintf(&b, " group_states=%s", orNone(strings.Join(c.GroupStates, ",")))
-	fmt.Fprintf(&b, " collect_last_stable_offset=%t collect_log_dirs=%t", c.CollectLastStableOffset, c.CollectLogDirs)
+	// Every collector knob is printed, including the ones that default on. This
+	// line is the only record of what an agent was actually running with, and
+	// applyCapabilityGates can switch several of these off after startup against
+	// an older cluster — the INFO line it logs is only readable against a
+	// baseline, which is this.
+	fmt.Fprintf(&b, " collect_last_stable_offset=%t collect_consumer_groups=%t collect_log_dirs=%t",
+		c.CollectLastStableOffset, c.CollectConsumerGroups, c.CollectLogDirs)
 	// Printing the cadence for a phase that never runs invites reading it as
 	// "log dirs are being collected". Same rule for every optional phase below.
 	if c.CollectLogDirs {
@@ -649,13 +623,19 @@ func (c *Config) Redacted() string {
 	if c.CollectThroughputWindow {
 		fmt.Fprintf(&b, " throughput_window=%s throughput_window_every=%d", c.ThroughputWindow, c.ThroughputWindowEvery)
 	}
+	fmt.Fprintf(&b, " collect_max_timestamp=%t collect_tiered_offsets=%t", c.CollectMaxTimestamp, c.CollectTieredOffsets)
+	// CollectLatestTiered is subordinate to CollectTieredOffsets, not an
+	// independent phase: it is ignored when the parent is off, so printing it
+	// there would advertise a setting with no effect.
+	if c.CollectTieredOffsets {
+		fmt.Fprintf(&b, " collect_latest_tiered=%t", c.CollectLatestTiered)
+	}
+	fmt.Fprintf(&b, " collect_share_groups=%t collect_configs=%t", c.CollectShareGroups, c.CollectConfigs)
+	if c.CollectConfigs {
+		fmt.Fprintf(&b, " configs_every=%d", c.ConfigsEvery)
+	}
 	fmt.Fprintf(&b, " collect_reassignments=%t collect_epoch_probes=%t collect_rpc_stats=%t",
 		c.CollectReassignments, c.CollectEpochProbes, c.CollectRPCStats)
-	fmt.Fprintf(&b, " collect_group_states=%t", c.CollectGroupStates)
-	if c.CollectGroupStates {
-		fmt.Fprintf(&b, " group_state_poll_interval=%s max_transitions_per_group=%d",
-			c.GroupStatePollInterval, c.MaxTransitionsPerGroup)
-	}
 	fmt.Fprintf(&b, " max_errors=%d max_error_samples=%d", c.MaxErrors, c.MaxErrorSamples)
 	// Only the caps that are set: five "=0" pairs on every startup line would
 	// bury the settings that matter.

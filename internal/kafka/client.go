@@ -69,8 +69,10 @@ func NewClient(cfg *config.Config, version string) (*Client, error) {
 		// MetadataMinAge -- 5s by default). At a collection interval at or below
 		// that, a cycle would issue no Metadata request at all and ship a stale
 		// broker/topic inventory stamped with a fresh sampled_at. Age it below
-		// the interval so every cycle refetches once, while the three metadata
-		// reads within one cycle still share a consistent snapshot.
+		// the interval so every cycle refetches once, while the five metadata
+		// reads within one cycle -- the cluster section's Metadata plus the
+		// ListTopics each of the four default-on List*Offsets begins with, see
+		// docs/ARCHITECTURE.md -- still share a consistent snapshot.
 		kgo.MetadataMinAge(metadataMinAge(cfg.CollectionInterval)),
 	}
 

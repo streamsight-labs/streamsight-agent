@@ -36,7 +36,6 @@ const (
 	sectionTopicsRemote  = "topics_remote_end"
 	sectionGroups        = "groups"
 	sectionOffsets       = "offsets"
-	sectionGroupStates   = "group_states"
 	sectionEpochProbes   = "epoch_probes"
 	sectionLogDirs       = "log_dirs"
 	sectionReassignments = "reassignments"
@@ -45,6 +44,37 @@ const (
 	sectionShareGroups   = "share_groups"
 	sectionBrokerRPC     = "broker_rpc"
 )
+
+// sectionNames is the constant block above in wire order. canonicalSections in
+// collector_test.go asserts finalize emits exactly this, in this order.
+var sectionNames = []string{
+	sectionCluster,
+	sectionTopics, sectionTopicsWindow, sectionTopicsLSO, sectionTopicsEnd,
+	sectionTopicsMaxTS, sectionTopicsLocal, sectionTopicsRemote,
+	sectionGroups, sectionOffsets,
+	sectionEpochProbes,
+	sectionLogDirs, sectionReassignments,
+	sectionTopicConfigs, sectionBrokerConfigs, sectionShareGroups,
+	sectionBrokerRPC,
+}
+
+// SectionNames returns the canonical ordered section list Collect emits on
+// every cycle, as a fresh copy.
+//
+// It is exported for one reason: internal/mockingest maintains the same list as
+// mockingest.DefaultSections, the required-section contract an ingest checks a
+// batch against, and that list had no binding to this one. It drifted exactly
+// that way once — 0226e0c added three sections here and DefaultSections kept the
+// old five-name topics block until it was corrected by hand — and the drift was
+// invisible because mockingest's own tests build their fixtures from
+// DefaultSections, so the two agreed circularly. A test in that package now
+// asserts equality against this, which is what makes the claim in
+// docs/ARCHITECTURE.md true rather than aspirational.
+func SectionNames() []string {
+	out := make([]string, len(sectionNames))
+	copy(out, sectionNames)
+	return out
+}
 
 // Coarse error kinds carried in CollectionError.Kind. A backend routes on these
 // without parsing Message: "authorization" is a human ACL fix, "coordinator" is

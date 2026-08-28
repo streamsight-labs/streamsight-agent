@@ -3,6 +3,9 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"os"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -43,12 +46,15 @@ var allKeys = []string{
 	"COLLECT_THROUGHPUT_WINDOW",
 	"THROUGHPUT_WINDOW",
 	"THROUGHPUT_WINDOW_EVERY",
+	"COLLECT_CONFIGS",
+	"CONFIGS_EVERY",
+	"COLLECT_MAX_TIMESTAMP",
+	"COLLECT_TIERED_OFFSETS",
+	"COLLECT_LATEST_TIERED",
+	"COLLECT_SHARE_GROUPS",
 	"COLLECT_REASSIGNMENTS",
 	"COLLECT_EPOCH_PROBES",
 	"COLLECT_RPC_STATS",
-	"COLLECT_GROUP_STATES",
-	"GROUP_STATE_POLL_INTERVAL",
-	"MAX_TRANSITIONS_PER_GROUP",
 	"MAX_ERRORS",
 	"MAX_ERROR_SAMPLES",
 	"MAX_TOPICS",
@@ -490,19 +496,21 @@ func TestLoadDefaults(t *testing.T) {
 		{"ExportGzip", cfg.ExportGzip, DefaultExportGzip},
 		{"IncludeInternalTopics", cfg.IncludeInternalTopics, false},
 		{"CollectLastStableOffset", cfg.CollectLastStableOffset, DefaultCollectLSO},
+		{"CollectConsumerGroups", cfg.CollectConsumerGroups, DefaultCollectConsumerGroups},
 		{"CollectLogDirs", cfg.CollectLogDirs, DefaultCollectLogDirs},
 		{"LogDirsEvery", cfg.LogDirsEvery, DefaultLogDirsEvery},
 		{"CollectThroughputWindow", cfg.CollectThroughputWindow, DefaultCollectThroughputWindow},
 		{"ThroughputWindow", cfg.ThroughputWindow, DefaultThroughputWindow},
 		{"ThroughputWindowEvery", cfg.ThroughputWindowEvery, DefaultThroughputWindowEvery},
+		{"CollectConfigs", cfg.CollectConfigs, DefaultCollectConfigs},
+		{"ConfigsEvery", cfg.ConfigsEvery, DefaultConfigsEvery},
+		{"CollectMaxTimestamp", cfg.CollectMaxTimestamp, DefaultCollectMaxTimestamp},
+		{"CollectTieredOffsets", cfg.CollectTieredOffsets, DefaultCollectTieredOffsets},
+		{"CollectLatestTiered", cfg.CollectLatestTiered, DefaultCollectLatestTiered},
+		{"CollectShareGroups", cfg.CollectShareGroups, DefaultCollectShareGroups},
 		{"CollectReassignments", cfg.CollectReassignments, DefaultCollectReassignments},
 		{"CollectEpochProbes", cfg.CollectEpochProbes, DefaultCollectEpochProbes},
 		{"CollectRPCStats", cfg.CollectRPCStats, DefaultCollectRPCStats},
-		{"CollectGroupStates", cfg.CollectGroupStates, DefaultCollectGroupStates},
-		{"GroupStatePollInterval", cfg.GroupStatePollInterval, DefaultGroupStatePollInterval},
-		// The one cap whose default is not "unlimited"; see
-		// DefaultMaxTransitionsPerGroup.
-		{"MaxTransitionsPerGroup", cfg.MaxTransitionsPerGroup, DefaultMaxTransitionsPerGroup},
 		{"MaxErrors", cfg.MaxErrors, DefaultMaxErrors},
 		{"MaxErrorSamples", cfg.MaxErrorSamples, DefaultMaxErrorSamples},
 		// 0 = unlimited; see DefaultMaxEntities.
@@ -757,9 +765,6 @@ func TestLoadOptionalCollectors(t *testing.T) {
 			"COLLECT_REASSIGNMENTS":     "false",
 			"COLLECT_EPOCH_PROBES":      "false",
 			"COLLECT_RPC_STATS":         "false",
-			"COLLECT_GROUP_STATES":      "true",
-			"GROUP_STATE_POLL_INTERVAL": "2s",
-			"MAX_TRANSITIONS_PER_GROUP": "64",
 		}))
 		cfg, err := Load()
 		if err != nil {
@@ -771,19 +776,14 @@ func TestLoadOptionalCollectors(t *testing.T) {
 		if cfg.CollectReassignments || cfg.CollectEpochProbes || cfg.CollectRPCStats {
 			t.Errorf("triggered phases = %t/%t/%t", cfg.CollectReassignments, cfg.CollectEpochProbes, cfg.CollectRPCStats)
 		}
-		if !cfg.CollectGroupStates || cfg.GroupStatePollInterval != 2*time.Second || cfg.MaxTransitionsPerGroup != 64 {
-			t.Errorf("group states = %t/%s/%d", cfg.CollectGroupStates, cfg.GroupStatePollInterval, cfg.MaxTransitionsPerGroup)
-		}
 	})
 
 	// Every one of these is a modulus, a ticker period or a window width, so the
 	// value Load would otherwise pass on either panics or asks about the future.
 	t.Run("nonsensical cadences and widths are rejected", func(t *testing.T) {
 		for key, value := range map[string]string{
-			"THROUGHPUT_WINDOW":         "0s",
-			"THROUGHPUT_WINDOW_EVERY":   "0",
-			"GROUP_STATE_POLL_INTERVAL": "-1s",
-			"MAX_TRANSITIONS_PER_GROUP": "-1",
+			"THROUGHPUT_WINDOW":       "0s",
+			"THROUGHPUT_WINDOW_EVERY": "0",
 		} {
 			setEnv(t, base(map[string]string{key: value}))
 			_, err := Load()
@@ -838,47 +838,6 @@ func TestCollectorWarnings(t *testing.T) {
 			t.Errorf("warnings = %v", cfg.Warnings())
 		}
 	})
-
-	// The one phase whose cost is not paid per cycle, so the warning states the
-	// request count in brokers rather than in batches.
-	t.Run("the fast group-state poll warns about its per-broker cost", func(t *testing.T) {
-		setEnv(t, base(map[string]string{"COLLECT_GROUP_STATES": "true"}))
-		cfg, err := Load()
-		if err != nil {
-			t.Fatalf("Load: %v", err)
-		}
-		w := strings.Join(cfg.Warnings(), "\n")
-		if !strings.Contains(w, "PER BROKER") {
-			t.Errorf("warnings = %v", cfg.Warnings())
-		}
-		if strings.Contains(w, "MAX_TRANSITIONS_PER_GROUP=0") {
-			t.Errorf("the default cap is not unlimited, so it must not warn: %v", cfg.Warnings())
-		}
-	})
-
-	t.Run("a poll no faster than the collection interval warns", func(t *testing.T) {
-		setEnv(t, base(map[string]string{"COLLECT_GROUP_STATES": "true", "GROUP_STATE_POLL_INTERVAL": "45s"}))
-		cfg, err := Load()
-		if err != nil {
-			t.Fatalf("Load: %v", err)
-		}
-		if !strings.Contains(strings.Join(cfg.Warnings(), "\n"), "GROUP_STATE_POLL_INTERVAL") {
-			t.Errorf("warnings = %v", cfg.Warnings())
-		}
-	})
-
-	// The watch is off by default, so neither of the two settings above is in
-	// force and neither may produce noise at startup.
-	t.Run("group-state settings are silent while the watch is off", func(t *testing.T) {
-		setEnv(t, base(map[string]string{"GROUP_STATE_POLL_INTERVAL": "60s", "MAX_TRANSITIONS_PER_GROUP": "0"}))
-		cfg, err := Load()
-		if err != nil {
-			t.Fatalf("Load: %v", err)
-		}
-		if len(cfg.Warnings()) != 0 {
-			t.Errorf("warnings = %v", cfg.Warnings())
-		}
-	})
 }
 
 func TestRedactedShowsTheCadenceOnlyWhenItApplies(t *testing.T) {
@@ -888,37 +847,143 @@ func TestRedactedShowsTheCadenceOnlyWhenItApplies(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	s := cfg.Redacted()
-	if !strings.Contains(s, "collect_last_stable_offset=true") || !strings.Contains(s, "collect_log_dirs=false") {
+	if !strings.Contains(s, "collect_last_stable_offset=true") || !strings.Contains(s, "collect_log_dirs=true") {
 		t.Errorf("redacted output missing the collector switches: %s", s)
 	}
-	if strings.Contains(s, "log_dirs_every=") {
+	// Log dirs are on by default, so their cadence IS in force and must print.
+	if !strings.Contains(s, fmt.Sprintf("log_dirs_every=%d", DefaultLogDirsEvery)) {
+		t.Errorf("redacted output missing the cadence in force: %s", s)
+	}
+	// The throughput window is the off-by-default phase this half of the test
+	// needs: its cadence must stay hidden while it cannot run.
+	if strings.Contains(s, "throughput_window_every=") {
 		t.Errorf("redacted output prints a cadence for a disabled phase: %s", s)
 	}
 	for _, want := range []string{
 		"collect_throughput_window=false",
+		"collect_consumer_groups=true",
+		"collect_max_timestamp=true",
+		"collect_tiered_offsets=false",
+		"collect_share_groups=false",
+		"collect_configs=true",
 		"collect_reassignments=true", "collect_epoch_probes=true",
-		"collect_rpc_stats=true", "collect_group_states=false",
+		"collect_rpc_stats=true",
 		// On by default, so its cadence IS in force and must be printed.
+		fmt.Sprintf("configs_every=%d", DefaultConfigsEvery),
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("redacted output missing %q: %s", want, s)
 		}
 	}
 	// Leading spaces: "collect_throughput_window=" contains the width's own key.
-	for _, unwanted := range []string{" throughput_window=", " group_state_poll_interval="} {
+	for _, unwanted := range []string{" throughput_window="} {
 		if strings.Contains(s, unwanted) {
 			t.Errorf("redacted output prints %q for a disabled phase: %s", unwanted, s)
 		}
 	}
+	// CollectLatestTiered is subordinate: it defaults ON but is ignored while
+	// the tiered phase is off, so printing it at the defaults would advertise a
+	// setting with no effect.
+	if strings.Contains(s, "collect_latest_tiered=") {
+		t.Errorf("redacted output prints the subordinate tiered switch while its parent is off: %s", s)
+	}
 
-	setEnv(t, base(map[string]string{"COLLECT_LOG_DIRS": "true"}))
+	// The other direction: enabling a phase brings its cadence into the line,
+	// and disabling one that defaults on takes it back out.
+	setEnv(t, base(map[string]string{"COLLECT_THROUGHPUT_WINDOW": "true"}))
 	cfg, err = Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !strings.Contains(cfg.Redacted(), fmt.Sprintf("log_dirs_every=%d", DefaultLogDirsEvery)) {
+	if !strings.Contains(cfg.Redacted(), fmt.Sprintf("throughput_window_every=%d", DefaultThroughputWindowEvery)) {
 		t.Errorf("redacted output missing the cadence in force: %s", cfg.Redacted())
 	}
+
+	setEnv(t, base(map[string]string{"COLLECT_LOG_DIRS": "false"}))
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if strings.Contains(cfg.Redacted(), "log_dirs_every=") {
+		t.Errorf("redacted output prints a cadence for a disabled phase: %s", cfg.Redacted())
+	}
+
+	setEnv(t, base(map[string]string{"COLLECT_CONFIGS": "false"}))
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if strings.Contains(cfg.Redacted(), "configs_every=") {
+		t.Errorf("redacted output prints a cadence for a disabled phase: %s", cfg.Redacted())
+	}
+
+	setEnv(t, base(map[string]string{"COLLECT_TIERED_OFFSETS": "true"}))
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !strings.Contains(cfg.Redacted(), "collect_latest_tiered=true") {
+		t.Errorf("redacted output missing the subordinate switch once its parent is on: %s", cfg.Redacted())
+	}
+}
+
+// TestRedactedNamesEveryCollectorSwitch is the guard on the startup line itself.
+// Redacted is the only record of what an agent was running with, and the way it
+// went wrong before was by omission: 0226e0c added seven collector settings, five
+// of them default-on, and none of them reached this line. Rather than list them
+// by hand a third time, this derives the expected keys from the Collect* and
+// *Every fields on Config.
+func TestRedactedNamesEveryCollectorSwitch(t *testing.T) {
+	setEnv(t, base(map[string]string{
+		// Every subordinate and cadenced phase forced on, so nothing is legitimately
+		// absent and any missing key is a genuine omission.
+		"COLLECT_THROUGHPUT_WINDOW": "true",
+		"COLLECT_TIERED_OFFSETS":    "true",
+		"COLLECT_SHARE_GROUPS":      "true",
+	}))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	line := cfg.Redacted()
+
+	rt := reflect.TypeOf(*cfg)
+	for i := 0; i < rt.NumField(); i++ {
+		name := rt.Field(i).Name
+		if !strings.HasPrefix(name, "Collect") && !strings.HasSuffix(name, "Every") {
+			continue
+		}
+		if name == "CollectionInterval" || name == "CollectionTimeout" {
+			continue
+		}
+		key := snakeCase(name)
+		if !strings.Contains(line, " "+key+"=") {
+			t.Errorf("Config.%s is a shipped collector setting but %q never reaches the startup line: %s", name, key, line)
+		}
+	}
+}
+
+// snakeCase mirrors the naming Redacted uses for its keys. Acronyms stay one
+// word: CollectRPCStats is printed as collect_rpc_stats, not collect_r_p_c_stats.
+func snakeCase(s string) string {
+	r := []rune(s)
+	var b strings.Builder
+	for i, c := range r {
+		upper := c >= 'A' && c <= 'Z'
+		if upper && i > 0 {
+			prevLower := r[i-1] >= 'a' && r[i-1] <= 'z'
+			nextLower := i+1 < len(r) && r[i+1] >= 'a' && r[i+1] <= 'z'
+			if prevLower || nextLower {
+				b.WriteByte('_')
+			}
+		}
+		if upper {
+			b.WriteRune(c - 'A' + 'a')
+			continue
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
 }
 
 func TestCapWarnings(t *testing.T) {
@@ -1009,5 +1074,63 @@ func TestEndpointDefaultCannotFlipAnUnconfiguredAgentIntoHTTPMode(t *testing.T) 
 	}
 	if cfg.ExportEndpoint != DefaultExportEndpoint {
 		t.Errorf("ExportEndpoint = %q, want the default %q", cfg.ExportEndpoint, DefaultExportEndpoint)
+	}
+}
+
+// TestAllKeysCoversEveryEnvVarLoadReads is the guard that keeps this file's
+// tests hermetic. setEnv blanks exactly the names in allKeys, so a knob that
+// Load reads but allKeys omits is inherited from the developer's or the CI
+// runner's shell: exporting COLLECT_CONFIGS=false would then silently change
+// what every test in this package loads, including TestLoadDefaults, which
+// would stop being able to see that the default moved.
+//
+// Rather than restate the list by hand a second time, this reads the package
+// source. Every env var in this package is spelled as an ALL_CAPS string
+// literal with at least one underscore — p.str/p.boolean/p.integer/p.duration/
+// p.regex calls, the os.Getenv calls, and the MAX_* table alike — and nothing
+// else in the package is spelled that way (SASL "PLAIN" has no underscore).
+// The check runs in both directions, so a deleted knob leaves a stale name
+// behind just as loudly as an added one leaves a gap.
+func TestAllKeysCoversEveryEnvVarLoadReads(t *testing.T) {
+	envLit := regexp.MustCompile(`"([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)"`)
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	inSource := map[string]string{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("ReadFile %s: %v", name, err)
+		}
+		for _, m := range envLit.FindAllStringSubmatch(string(src), -1) {
+			inSource[m[1]] = name
+		}
+	}
+	if len(inSource) == 0 {
+		t.Fatal("found no env var literals in the package source; the scan is broken, not the config")
+	}
+
+	known := map[string]bool{}
+	for _, k := range allKeys {
+		known[k] = true
+	}
+	for key, file := range inSource {
+		if !known[key] {
+			t.Errorf("%s is read in %s but missing from allKeys: setEnv does not blank it, so the "+
+				"ambient environment leaks into every test in this package. Add it to allKeys, "+
+				"and add its default to TestLoadDefaults.", key, file)
+		}
+	}
+	for _, k := range allKeys {
+		if _, ok := inSource[k]; !ok {
+			t.Errorf("allKeys lists %s but no non-test file in this package mentions it; the knob "+
+				"was deleted and the name outlived it.", k)
+		}
 	}
 }

@@ -37,9 +37,6 @@ type Agent struct {
 	collector batchCollector
 	exporter  export.Exporter
 
-	// stateWatch is the fast group-state poll, nil when it is off. Run owns its
-	// goroutine; it stops with the signal context and needs no other shutdown.
-	stateWatch *collector.GroupStateWatcher
 	// caps is the startup fingerprint, stamped onto every batch. It is decided
 	// once because Probe caches it for the client's lifetime, so re-deriving it
 	// per cycle would ship the same bytes for another map allocation.
@@ -101,13 +98,7 @@ func New(cfg *config.Config, version string) (*Agent, error) {
 		caps = nil
 	}
 
-	watcher, err := newGroupStateWatcher(cfg, logger, client, caps)
-	if err != nil {
-		client.Close()
-		return nil, fmt.Errorf("create group state watcher: %w", err)
-	}
-
-	opts := collectorOptions(cfg, logger, watcher)
+	opts := collectorOptions(cfg, logger)
 	applyCapabilityGates(&opts, caps, logger)
 
 	coll, err := collector.New(client, opts)
@@ -137,15 +128,14 @@ func New(cfg *config.Config, version string) (*Agent, error) {
 	logger.Info("export configured", "mode", cfg.ExportMode, "target", cfg.ExportTarget())
 
 	return &Agent{
-		cfg:        cfg,
-		logger:     logger,
-		version:    version,
-		client:     client,
-		collector:  coll,
-		exporter:   exporter,
-		stateWatch: watcher,
-		caps:       caps.Wire(),
-		startedAt:  time.Now(),
+		cfg:       cfg,
+		logger:    logger,
+		version:   version,
+		client:    client,
+		collector: coll,
+		exporter:  exporter,
+		caps:      caps.Wire(),
+		startedAt: time.Now(),
 	}, nil
 }
 
@@ -196,44 +186,12 @@ func applyCapabilityGates(opts *collector.Options, caps *kafka.Capabilities, log
 	}
 }
 
-// newGroupStateWatcher builds the fast group-state poll, or returns nil when it
-// is off or the cluster cannot serve it. It fails only on a malformed group
-// regex, which config.Load has already rejected.
-//
-// The capability is ListGroups v4 (KIP-518, Kafka 2.6+) — the version whose
-// response carries GroupState. Below it kadm leaves ListedGroup.State empty, so
-// every observation would be one meaningless transition per group: worse than
-// nothing, because it looks like data.
-func newGroupStateWatcher(cfg *config.Config, logger *slog.Logger, client *kafka.Client, caps *kafka.Capabilities) (*collector.GroupStateWatcher, error) {
-	if !cfg.CollectGroupStates {
-		return nil, nil
-	}
-	if caps != nil && !caps.SupportsGroupStatesFilter() {
-		logger.Info("ListGroups does not report group state below v4 (KIP-518, Kafka 2.6+), disabling the group state watch: every observation would be an empty state")
-		return nil, nil
-	}
-	return collector.NewGroupStateWatcher(client, collector.GroupStateWatchOptions{
-		PollInterval: cfg.GroupStatePollInterval,
-		// The same filter the collection cycle uses, or the fast poll and groups[]
-		// disagree about which groups exist.
-		GroupIncludeRegex:      cfg.GroupIncludeRegex,
-		GroupExcludeRegex:      cfg.GroupExcludeRegex,
-		MaxGroups:              cfg.MaxGroups,
-		MaxTransitionsPerGroup: cfg.MaxTransitionsPerGroup,
-		Logger:                 logger,
-	})
-}
-
 // collectorOptions translates the validated config into collector options. It
 // is a named function rather than a literal inside New so a test can prove
 // every setting actually reaches the collector: GroupStates was once plumbed
 // into ListGroups but missing from this mapping, which made GROUP_STATES
 // silently dead — a gap no collector test could have caught.
-//
-// watcher is a live object rather than a setting because the fast poll has to
-// start before the first cycle to have a baseline to transition from; it is
-// still built from config, so the sweep covers it.
-func collectorOptions(cfg *config.Config, logger *slog.Logger, watcher *collector.GroupStateWatcher) collector.Options {
+func collectorOptions(cfg *config.Config, logger *slog.Logger) collector.Options {
 	return collector.Options{
 		Timeout:               cfg.CollectionTimeout,
 		IncludeInternalTopics: cfg.IncludeInternalTopics,
@@ -260,17 +218,15 @@ func collectorOptions(cfg *config.Config, logger *slog.Logger, watcher *collecto
 		CollectReassignments:    cfg.CollectReassignments,
 		CollectEpochProbes:      cfg.CollectEpochProbes,
 		CollectRPCStats:         cfg.CollectRPCStats,
-		GroupStateWatch:         watcher,
 
 		Limits: collector.Limits{
-			MaxErrors:              cfg.MaxErrors,
-			MaxErrorSamples:        cfg.MaxErrorSamples,
-			MaxTopics:              cfg.MaxTopics,
-			MaxPartitionsPerTopic:  cfg.MaxPartitionsPerTopic,
-			MaxGroups:              cfg.MaxGroups,
-			MaxMembersPerGroup:     cfg.MaxMembersPerGroup,
-			MaxOffsetsPerGroup:     cfg.MaxOffsetsPerGroup,
-			MaxTransitionsPerGroup: cfg.MaxTransitionsPerGroup,
+			MaxErrors:             cfg.MaxErrors,
+			MaxErrorSamples:       cfg.MaxErrorSamples,
+			MaxTopics:             cfg.MaxTopics,
+			MaxPartitionsPerTopic: cfg.MaxPartitionsPerTopic,
+			MaxGroups:             cfg.MaxGroups,
+			MaxMembersPerGroup:    cfg.MaxMembersPerGroup,
+			MaxOffsetsPerGroup:    cfg.MaxOffsetsPerGroup,
 		},
 		Logger: logger,
 	}
@@ -285,14 +241,6 @@ func (a *Agent) Run() error {
 
 	ticker := time.NewTicker(a.cfg.CollectionInterval)
 	defer ticker.Stop()
-
-	// Started before the first cycle, on the SIGNAL context rather than a
-	// per-cycle one: a state transition means nothing without a baseline to
-	// transition from, and the watch must outlive every individual cycle. It
-	// returns when ctx does, so there is nothing else to shut down.
-	if a.stateWatch != nil {
-		go a.stateWatch.Run(ctx)
-	}
 
 	a.runCycle(ctx)
 

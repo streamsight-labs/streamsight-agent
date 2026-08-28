@@ -55,8 +55,8 @@ func TestTruncationPresenceMarksIncompleteBatch(t *testing.T) {
 
 func TestTruncationAdd(t *testing.T) {
 	total := Truncation{Topics: 1}
-	total.Add(Truncation{Topics: 2, Partitions: 3, Groups: 4, Members: 5, Offsets: 6, GroupStateTransitions: 9, ErrorsCollapsed: 7, ErrorsDropped: 8})
-	want := Truncation{Topics: 3, Partitions: 3, Groups: 4, Members: 5, Offsets: 6, GroupStateTransitions: 9, ErrorsCollapsed: 7, ErrorsDropped: 8}
+	total.Add(Truncation{Topics: 2, Partitions: 3, Groups: 4, Members: 5, Offsets: 6, ErrorsCollapsed: 7, ErrorsDropped: 8})
+	want := Truncation{Topics: 3, Partitions: 3, Groups: 4, Members: 5, Offsets: 6, ErrorsCollapsed: 7, ErrorsDropped: 8}
 	if total != want {
 		t.Errorf("Add() = %+v, want %+v", total, want)
 	}
@@ -153,7 +153,7 @@ func TestBatchOmitsOptionalBlocksWhenNotCollected(t *testing.T) {
 	// must be byte-identical to one from before they existed, or a v1 consumer
 	// gains keys it never agreed to.
 	m := marshalMap(t, Batch{SchemaVersion: SchemaVersion})
-	for _, key := range []string{"throughput_window", "reassignments", "group_states", "epoch_probes", "principal"} {
+	for _, key := range []string{"throughput_window", "reassignments", "epoch_probes", "topic_configs", "broker_configs", "share_groups", "principal"} {
 		if _, ok := m[key]; ok {
 			t.Errorf("%s present on a batch that collected none, want absent", key)
 		}
@@ -273,20 +273,6 @@ func TestLatencyHistogramIsAggregatable(t *testing.T) {
 	}
 	if total != h.Count {
 		t.Errorf("buckets sum to %d, want Count = %d", total, h.Count)
-	}
-}
-
-func TestGroupStateWindowKeepsTruePreCapCount(t *testing.T) {
-	// A rebalance storm is exactly when the transition list gets capped, so the
-	// count must stay true or the storm reads as calm.
-	m := marshalMap(t, GroupStateWindow{GroupID: "payments", TransitionCount: 42})
-	if m["transition_count"] != float64(42) {
-		t.Errorf("transition_count = %v, want 42", m["transition_count"])
-	}
-	for _, key := range []string{"state_at_start", "state_at_end"} {
-		if v, ok := m[key]; !ok || v != "" {
-			t.Errorf("%s = %v (present=%v), want an explicit empty string for a pre-2.6 broker", key, v, ok)
-		}
 	}
 }
 

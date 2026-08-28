@@ -109,8 +109,15 @@ export:
     medium: ""
 
 collection:
-  # COLLECTION_INTERVAL -- must be > 0.
-  interval: "30s"
+  # Cadence knobs are EMPTY BY DEFAULT and rendered only when you set them, so
+  # the agent's own defaults stay the single source of truth. The alternative --
+  # restating each default here -- is how this file came to pin a 30s interval
+  # for a build whose default had moved to 5s.
+  #
+  # COLLECTION_INTERVAL -- must be > 0. Empty uses the agent default, currently
+  # 5s. Every *Every knob below is a CYCLE COUNT, so changing this changes their
+  # wall-clock meaning too.
+  interval: ""
   # COLLECTION_TIMEOUT -- per-cycle deadline. Empty lets the agent derive 80%
   # of the interval.
   timeout: ""
@@ -141,16 +148,35 @@ collection:
   # lag, silently. Costs one extra ListOffsets fan-out per cycle and no ACL.
   collectLastStableOffset: true
   # COLLECT_LOG_DIRS -- adds the log_dirs[] section: per-broker, per-directory
-  # replica bytes, per-replica lag and offline-disk detection. No ACL beyond
-  # the DESCRIBE on CLUSTER already required, but the response is O(replicas)
-  # = partitions x replication factor, the largest payload the agent emits, and
-  # it has never been run against more than a single broker. Size limits.* for
-  # the cluster before turning this on.
-  collectLogDirs: false
+  # replica bytes, per-replica lag and offline-disk detection. On by default:
+  # it is the only source of disk bytes, and days-to-full, per-topic storage
+  # and byte-rate-per-record all rest on it. No ACL beyond the DESCRIBE on
+  # CLUSTER already required.
+  #
+  # The response is O(replicas) = partitions x replication factor and is the
+  # largest section the agent emits, which is what logDirsEvery is for. On a
+  # wide cluster set limits.maxPartitionsPerTopic -- unlike the offset
+  # listings, the log-dir request names partitions explicitly, so that cap
+  # shrinks the request and not just the payload.
+  collectLogDirs: true
   # LOG_DIRS_EVERY -- run the log-dirs phase every Nth cycle. Must be >= 1
-  # (1 = every cycle). Ten cycles is five minutes at the default interval;
-  # disks fill over hours. Rendered only when collectLogDirs is true.
-  logDirsEvery: 10
+  # (1 = every cycle). Empty uses the agent default, currently 24 = every two
+  # minutes at the 5s interval. Rendered only when collectLogDirs is true.
+  logDirsEvery: ""
+
+  # COLLECT_CONFIGS -- adds topic_configs[] and broker_configs[]. On by
+  # default, and the only collector needing an ACL outside the three DESCRIBE
+  # grants: DESCRIBE_CONFIGS on TOPIC and on CLUSTER. Missing either is not
+  # fatal -- that section reports `unauthorized` and the rest of the batch is
+  # unaffected. Leave it on: without cleanup.policy nothing downstream can tell
+  # a topic is compacted, and on a compacted topic consumer lag is overstated
+  # by an unknowable amount with nothing flagging it as unreliable.
+  collectConfigs: true
+  # CONFIGS_EVERY -- run the configs phase every Nth cycle. Empty uses the
+  # agent default, currently 360 = every thirty minutes at the 5s interval,
+  # the slowest cadence in the agent. Rendered only when collectConfigs is
+  # true.
+  configsEvery: ""
 
 # Cardinality caps: hard ceilings on what one batch may contain.
 #

@@ -30,20 +30,13 @@ type Limits struct {
 	MaxGroups             int
 	MaxMembersPerGroup    int
 	MaxOffsetsPerGroup    int
-
-	// MaxTransitionsPerGroup bounds the fast poll's per-group transition list and
-	// the dwell samples kept beside it. Unlike the caps above it belongs to the
-	// group-state watcher, which accumulates between cycles: it is what keeps a
-	// rebalance storm — exactly when that list is longest — from growing without
-	// bound.
-	MaxTransitionsPerGroup int
 }
 
 // any reports whether any ENTITY cap is set, which decides whether the batch
 // echoes a limits block. The caps with a non-zero default — the two error caps
-// and MaxTransitionsPerGroup — are excluded because they would make any()
-// unconditionally true and contradict Batch.Limits' "nil when every cap is
-// unlimited". They are still echoed by wire() whenever the block is emitted.
+// — are excluded because they would make any() unconditionally true and
+// contradict Batch.Limits' "nil when every cap is unlimited". They are still
+// echoed by wire() whenever the block is emitted.
 func (l Limits) any() bool {
 	return l.MaxTopics != 0 || l.MaxPartitionsPerTopic != 0 || l.MaxGroups != 0 ||
 		l.MaxMembersPerGroup != 0 || l.MaxOffsetsPerGroup != 0
@@ -58,8 +51,6 @@ func (l Limits) wire() *metrics.Limits {
 		MaxGroups:             l.MaxGroups,
 		MaxMembersPerGroup:    l.MaxMembersPerGroup,
 		MaxOffsetsPerGroup:    l.MaxOffsetsPerGroup,
-
-		MaxTransitionsPerGroup: l.MaxTransitionsPerGroup,
 	}
 }
 

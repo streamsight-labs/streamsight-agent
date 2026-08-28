@@ -94,23 +94,28 @@ func validBatch(seq uint64) *metrics.Batch {
 			},
 		},
 		// The collector's real section output under DEFAULT config: every phase
-		// emits its section on every cycle, and the ones that did not run —
-		// log_dirs and the window because they are off, the two triggered phases
-		// because nothing triggered them, group_states because the fast poll is
-		// off — say "skipped" rather than going absent. topics_end is stamped
-		// after offsets finished, which is the phase-order constraint.
+		// emits its section on every cycle, and the ones that did not run — the
+		// window, the tiered pair and share_groups because they are off, the two
+		// triggered phases because nothing triggered them — say "skipped" rather
+		// than going absent. topics_end is stamped after offsets finished, which
+		// is the phase-order constraint.
 		Sections: []metrics.Section{
 			{Name: "cluster", Status: metrics.SectionOK, SampledAt: ms(0), DurationMs: 1},
 			{Name: "topics", Status: metrics.SectionOK, SampledAt: ms(1), DurationMs: 2},
 			{Name: "topics_window", Status: metrics.SectionSkipped, SampledAt: ms(1), DurationMs: 0},
 			{Name: "topics_lso", Status: metrics.SectionOK, SampledAt: ms(8), DurationMs: 1},
 			{Name: "topics_end", Status: metrics.SectionOK, SampledAt: ms(10), DurationMs: 3},
+			{Name: "topics_max_timestamp", Status: metrics.SectionOK, SampledAt: ms(10), DurationMs: 1},
+			{Name: "topics_local_start", Status: metrics.SectionSkipped, SampledAt: ms(11), DurationMs: 0},
+			{Name: "topics_remote_end", Status: metrics.SectionSkipped, SampledAt: ms(11), DurationMs: 0},
 			{Name: "groups", Status: metrics.SectionOK, SampledAt: ms(2), DurationMs: 4},
 			{Name: "offsets", Status: metrics.SectionOK, SampledAt: ms(3), DurationMs: 5},
-			{Name: "group_states", Status: metrics.SectionSkipped, SampledAt: ms(11), DurationMs: 0},
 			{Name: "epoch_probes", Status: metrics.SectionSkipped, SampledAt: ms(11), DurationMs: 0},
 			{Name: "log_dirs", Status: metrics.SectionSkipped, SampledAt: ms(11), DurationMs: 0},
 			{Name: "reassignments", Status: metrics.SectionSkipped, SampledAt: ms(11), DurationMs: 0},
+			{Name: "topic_configs", Status: metrics.SectionOK, SampledAt: ms(12), DurationMs: 2},
+			{Name: "broker_configs", Status: metrics.SectionOK, SampledAt: ms(12), DurationMs: 1},
+			{Name: "share_groups", Status: metrics.SectionSkipped, SampledAt: ms(13), DurationMs: 0},
 			{Name: "broker_rpc", Status: metrics.SectionOK, SampledAt: ms(13), DurationMs: 0},
 		},
 	}

@@ -33,7 +33,11 @@ data:
   {{- end }}
 
   # -- Collection ---------------------------------------------------------
-  COLLECTION_INTERVAL: {{ .Values.collection.interval | quote }}
+  # Cadence keys are rendered only when set, so the agent's compiled-in
+  # defaults are not shadowed by a stale value pinned here.
+  {{- with .Values.collection.interval }}
+  COLLECTION_INTERVAL: {{ . | quote }}
+  {{- end }}
   {{- with .Values.collection.timeout }}
   COLLECTION_TIMEOUT: {{ . | quote }}
   {{- end }}
@@ -55,12 +59,23 @@ data:
   {{- end }}
 
   # -- Optional collectors ------------------------------------------------
-  # Neither adds an ACL beyond the DESCRIBE on CLUSTER/TOPIC/GROUP the agent
-  # already requires. They are payload and latency switches.
+  # The offset and log-dir switches are payload and latency switches: neither
+  # adds an ACL beyond the DESCRIBE on CLUSTER/TOPIC/GROUP the agent already
+  # requires. COLLECT_CONFIGS is the exception -- it needs DESCRIBE_CONFIGS on
+  # TOPIC and on CLUSTER, and reports `unauthorized` for those two sections
+  # without it rather than failing the cycle.
   COLLECT_LAST_STABLE_OFFSET: {{ .Values.collection.collectLastStableOffset | quote }}
   COLLECT_LOG_DIRS: {{ .Values.collection.collectLogDirs | quote }}
   {{- if .Values.collection.collectLogDirs }}
-  LOG_DIRS_EVERY: {{ .Values.collection.logDirsEvery | int | quote }}
+  {{- with .Values.collection.logDirsEvery }}
+  LOG_DIRS_EVERY: {{ . | int | quote }}
+  {{- end }}
+  {{- end }}
+  COLLECT_CONFIGS: {{ .Values.collection.collectConfigs | quote }}
+  {{- if .Values.collection.collectConfigs }}
+  {{- with .Values.collection.configsEvery }}
+  CONFIGS_EVERY: {{ . | int | quote }}
+  {{- end }}
   {{- end }}
 
   # -- Cardinality caps ---------------------------------------------------

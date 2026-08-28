@@ -132,13 +132,6 @@ type Options struct {
 	// agent already sends. Zero extra requests, so it defaults on.
 	CollectRPCStats bool
 
-	// GroupStateWatch is the fast group-state poll, or nil when the watch is off
-	// or the cluster is too old to populate ListedGroup.State. The agent owns its
-	// goroutine; the collector only drains it. It is a live object rather than a
-	// bool because the poll has to start before the first cycle to have a
-	// baseline to transition from.
-	GroupStateWatch *GroupStateWatcher
-
 	// Limits caps what one batch may contain. The zero value is unlimited.
 	Limits Limits
 
@@ -155,10 +148,6 @@ type Collector struct {
 	groups *filter
 	limits Limits
 	log    *slog.Logger
-
-	// stateWatch is the agent's fast group-state poll, nil when it is not
-	// running. The collector never starts or stops it.
-	stateWatch *GroupStateWatcher
 
 	// cycle drives the cadence of every phase that samples on every Nth cycle.
 	// Atomic because nothing in this package's contract requires Collect to be
@@ -185,13 +174,12 @@ func New(client *kafka.Client, opts Options) (*Collector, error) {
 		log = slog.Default()
 	}
 	return &Collector{
-		client:     client,
-		opts:       opts,
-		topics:     topics,
-		groups:     groups,
-		limits:     opts.Limits,
-		log:        log,
-		stateWatch: opts.GroupStateWatch,
+		client: client,
+		opts:   opts,
+		topics: topics,
+		groups: groups,
+		limits: opts.Limits,
+		log:    log,
 	}, nil
 }
 
@@ -239,9 +227,9 @@ func New(client *kafka.Client, opts Options) (*Collector, error) {
 // than raw metadata, so everything they emit has a join partner in the same
 // batch.
 //
-// group_states and broker_rpc are outside the graph entirely: both drain
-// accumulators and issue no request, so they run after wg.Wait(), which is what
-// makes the RPC window cover this cycle's own traffic.
+// broker_rpc is outside the graph entirely: it drains an accumulator and issues
+// no request, so it runs after wg.Wait(), which is what makes the RPC window
+// cover this cycle's own traffic.
 //
 // AgentVersion, AgentInstanceID, BatchSeq, Principal and the envelope half of
 // Agent are left zero for the agent loop to fill in.
@@ -424,10 +412,9 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		ShareGroups:      shareGroups,
 	}
 
-	// Post-passes over the finished batch. Both drain accumulators and issue no
-	// request of their own.
-	var statesSec, rpcSec *section
-	batch.GroupStates, statesSec = c.collectGroupStates(c.stateWatch)
+	// Post-pass over the finished batch: it drains an accumulator and issues no
+	// request of its own.
+	var rpcSec *section
 	batch.Agent.RPC, rpcSec = c.collectRPC(c.opts.CollectRPCStats)
 
 	// Stamped after the post-passes so collection_ms covers the whole cycle.
@@ -438,7 +425,7 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		topicSecs.starts, windowSec, topicSecs.lso, topicSecs.end,
 		topicSecs.maxTS, topicSecs.local, topicSecs.remote,
 		groupsSec, offsetsSec,
-		statesSec, epochSec,
+		epochSec,
 		logDirsSec, reassignSec, topicCfgSec, brokerCfgSec, shareSec, rpcSec,
 	}
 	c.finalize(batch, secs, groupsDropped)

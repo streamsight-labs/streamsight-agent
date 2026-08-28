@@ -94,28 +94,6 @@ errors[].message string
 errors[].partition *int32 nullable omitempty
 errors[].section string
 errors[].topic string omitempty
-group_states *metrics.GroupStateWatch nullable omitempty
-group_states.groups []metrics.GroupStateWindow
-group_states.groups[].coordinator int32
-group_states.groups[].group_id string
-group_states.groups[].state_at_end string
-group_states.groups[].state_at_start string
-group_states.groups[].states []metrics.GroupStateDwell
-group_states.groups[].states[].completed int
-group_states.groups[].states[].completed_ms []int64
-group_states.groups[].states[].entries int
-group_states.groups[].states[].observed_ms int64
-group_states.groups[].states[].state string
-group_states.groups[].transition_count int
-group_states.groups[].transitions []metrics.GroupStateTransition
-group_states.groups[].transitions[].at time.Time
-group_states.groups[].transitions[].from string
-group_states.groups[].transitions[].to string
-group_states.missed_polls int
-group_states.poll_interval_ms int64
-group_states.polls int
-group_states.window_end time.Time
-group_states.window_start time.Time
 groups []metrics.GroupMetrics
 groups[].assignment_epoch *int32 nullable omitempty
 groups[].assignor string omitempty
@@ -155,7 +133,6 @@ limits.max_members_per_group int omitempty
 limits.max_offsets_per_group int omitempty
 limits.max_partitions_per_topic int omitempty
 limits.max_topics int omitempty
-limits.max_transitions_per_group int omitempty
 log_dirs []metrics.LogDir omitempty
 log_dirs[].broker int32
 log_dirs[].dir string
@@ -266,7 +243,6 @@ topics[].replication_factor int
 truncation *metrics.Truncation nullable omitempty
 truncation.errors_collapsed int omitempty
 truncation.errors_dropped int omitempty
-truncation.group_state_transitions int omitempty
 truncation.groups int omitempty
 truncation.members int omitempty
 truncation.offsets int omitempty

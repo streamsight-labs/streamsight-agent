@@ -42,9 +42,13 @@ data:
   # EXPORT_GZIP: "true"
 
   # -- Collection ---------------------------------------------------------
-  COLLECTION_INTERVAL: "30s"
+  # Left unset on purpose: the agent's own default (currently 5s) applies, and
+  # a value pinned here would shadow it silently the next time it moves. Set it
+  # only to override. Every *_EVERY knob is a CYCLE COUNT, so changing this
+  # changes their wall-clock meaning too.
+  # COLLECTION_INTERVAL: "5s"
   # Per-cycle deadline. Omitted, the agent derives 80% of the interval.
-  # COLLECTION_TIMEOUT: "24s"
+  # COLLECTION_TIMEOUT: "4s"
   INCLUDE_INTERNAL_TOPICS: "false"
   # Filters. Empty or absent means match everything; exclude wins over
   # include. Compiled at startup, so a bad pattern fails the pod.
@@ -62,22 +66,36 @@ data:
   # GROUP_STATES: "Stable,Empty"
 
   # -- Optional collectors ------------------------------------------------
-  # Neither needs an ACL beyond the three DESCRIBE grants.
+  # The offset and log-dir switches need no ACL beyond the three DESCRIBE
+  # grants; COLLECT_CONFIGS below is the one exception, and says so.
   #
   # last_stable_offset: leave it on. end_offset is the high watermark, so
   # without the LSO every read_committed consumer on a transactional topic
   # reports permanent false lag, with nothing anywhere reporting a failure.
   COLLECT_LAST_STABLE_OFFSET: "true"
-  # log_dirs: per-broker, per-directory replica bytes and offline-disk
-  # detection. Off by default because the response is O(replicas) = partitions
-  # x replication factor -- the largest payload the agent emits -- and it has
-  # never been run against more than a single broker. Set the MAX_* caps below
-  # before enabling it on a real cluster.
-  COLLECT_LOG_DIRS: "false"
-  # Cadence for the log-dirs phase. Must be >= 1 (1 = every cycle). Ten is
-  # five minutes at the default interval; disks fill over hours. Ignored when
-  # COLLECT_LOG_DIRS is false.
-  # LOG_DIRS_EVERY: "10"
+  # log_dirs: per-broker, per-directory replica bytes, per-replica lag and
+  # offline-disk detection. On: it is the only source of disk bytes, so
+  # days-to-full, per-topic storage and byte-rate-per-record all rest on it.
+  # The response is O(replicas) = partitions x replication factor and is the
+  # largest section emitted, which is what LOG_DIRS_EVERY is for. On a wide
+  # cluster set MAX_PARTITIONS_PER_TOPIC below -- unlike the offset listings,
+  # the log-dir request names partitions explicitly, so that cap shrinks the
+  # request itself and not just the payload.
+  COLLECT_LOG_DIRS: "true"
+  # Cadence for the log-dirs phase. Must be >= 1 (1 = every cycle). Unset uses
+  # the agent default, currently 24 = every two minutes at the 5s interval.
+  # LOG_DIRS_EVERY: "24"
+  # topic_configs / broker_configs. On by default, and the only collector
+  # needing an ACL outside the three DESCRIBE grants: DESCRIBE_CONFIGS on TOPIC
+  # and on CLUSTER. Missing either is not fatal -- that section reports
+  # `unauthorized` and the rest of the batch is unaffected. Leave it on:
+  # without cleanup.policy nothing downstream can tell a topic is compacted,
+  # and on a compacted topic consumer lag is overstated by an unknowable
+  # amount with nothing flagging it as unreliable.
+  # COLLECT_CONFIGS: "true"
+  # Unset uses the agent default, currently 360 = every thirty minutes at the
+  # 5s interval, the slowest cadence in the agent.
+  # CONFIGS_EVERY: "360"
 
   # -- Cardinality caps ---------------------------------------------------
   # Hard ceilings on one batch. Every ENTITY cap defaults to 0 = unlimited,

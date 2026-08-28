@@ -283,3 +283,118 @@ func TestEpochProbeShapesTheAnswer(t *testing.T) {
 		}
 	})
 }
+
+// The suppression set is the phase's memory, and the only thing standing
+// between a rolling restart and a permanent fan-out. These pin the property
+// that makes it safe: it remembers ANSWERS, never asks.
+func TestProbedEpochsRemembersAnswersNotAsks(t *testing.T) {
+	k := epochProbeKey{topic: "orders", topicID: "abc", partition: 0, committed: 5, current: 7}
+
+	t.Run("asking does not retire the question", func(t *testing.T) {
+		var p probedEpochs
+		if p.answered(k) {
+			t.Fatal("a fresh set answered a question it never saw")
+		}
+		// The whole bug: this used to record on the read, so a probe whose
+		// request then failed was never re-asked.
+		if p.answered(k) {
+			t.Error("answered recorded the question it was only asked about")
+		}
+	})
+
+	t.Run("an answer retires it", func(t *testing.T) {
+		var p probedEpochs
+		p.remember(k)
+		if !p.answered(k) {
+			t.Error("remembered question was not retired")
+		}
+	})
+
+	t.Run("remember is idempotent across groups", func(t *testing.T) {
+		// Two groups mismatching identically on one partition share a probeKey
+		// (it carries no group), ask one question, and both record it.
+		var p probedEpochs
+		p.remember(k)
+		p.remember(k)
+		if len(p.seen) != 1 {
+			t.Errorf("len(seen) = %d, want 1", len(p.seen))
+		}
+	})
+
+	t.Run("a different question is still open", func(t *testing.T) {
+		var p probedEpochs
+		p.remember(k)
+		// A later election moves the current epoch on, which is a new question
+		// about the same partition and must be asked.
+		next := k
+		next.current = 8
+		if p.answered(next) {
+			t.Error("a new current epoch inherited the old question's answer")
+		}
+		// So does a delete-and-recreate, which is why topicID is in the key.
+		recreated := k
+		recreated.topicID = "def"
+		if p.answered(recreated) {
+			t.Error("a recreated topic inherited the old topic's answer")
+		}
+	})
+
+	t.Run("evicts wholesale when full", func(t *testing.T) {
+		var p probedEpochs
+		for i := 0; i < maxProbedEpochs; i++ {
+			p.remember(epochProbeKey{topic: "t", partition: int32(i)})
+		}
+		if len(p.seen) != maxProbedEpochs {
+			t.Fatalf("len(seen) = %d, want %d", len(p.seen), maxProbedEpochs)
+		}
+		p.remember(k)
+		if len(p.seen) != 1 || !p.answered(k) {
+			t.Errorf("len(seen) = %d, want a clean slate holding only the new key", len(p.seen))
+		}
+	})
+}
+
+func TestEpochAnswerSettlesOnlyOnALeaderAnswer(t *testing.T) {
+	tests := []struct {
+		name string
+		a    epochAnswer
+		want bool
+	}{
+		{
+			name: "leader answered",
+			a:    epochAnswer{offset: kadm.OffsetForLeaderEpoch{LeaderEpoch: 5, EndOffset: 90}, found: true, usable: true},
+			want: true,
+		},
+		{
+			// -1 is a real answer: re-asking cannot change it.
+			name: "leader does not know the epoch",
+			a:    epochAnswer{offset: kadm.OffsetForLeaderEpoch{LeaderEpoch: -1, EndOffset: -1}, found: true, usable: true},
+			want: true,
+		},
+		{
+			name: "whole request failed",
+			a:    epochAnswer{found: true, usable: false},
+			want: false,
+		},
+		{
+			name: "response omitted the partition",
+			a:    epochAnswer{found: false, usable: true},
+			want: false,
+		},
+		{
+			// NOT_LEADER_FOR_PARTITION during the very election that triggered
+			// the probe is the case this exists for.
+			name: "leader returned an error code",
+			a:    epochAnswer{offset: kadm.OffsetForLeaderEpoch{Err: kerr.NotLeaderForPartition}, found: true, usable: true},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.a.settles(); got != tt.want {
+				t.Errorf("settles() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}

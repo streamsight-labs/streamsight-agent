@@ -123,10 +123,27 @@ var canonicalSections = []string{
 	sectionTopics, sectionTopicsWindow, sectionTopicsLSO, sectionTopicsEnd,
 	sectionTopicsMaxTS, sectionTopicsLocal, sectionTopicsRemote,
 	sectionGroups, sectionOffsets,
-	sectionGroupStates, sectionEpochProbes,
+	sectionEpochProbes,
 	sectionLogDirs, sectionReassignments,
 	sectionTopicConfigs, sectionBrokerConfigs, sectionShareGroups,
 	sectionBrokerRPC,
+}
+
+// TestSectionNamesMatchesCanonical binds the exported list to the hand-written
+// one above. SectionNames is what internal/mockingest checks its required-section
+// contract against, so it has to be the same list this package's own assertions
+// are written against, not a third restatement that can drift from both.
+func TestSectionNamesMatchesCanonical(t *testing.T) {
+	if got := SectionNames(); !slices.Equal(got, canonicalSections) {
+		t.Errorf("SectionNames() = %v, canonicalSections = %v", got, canonicalSections)
+	}
+	// A fresh copy each call: a caller that sorts or truncates the result must
+	// not be able to re-order the wire contract for everyone else.
+	a := SectionNames()
+	a[0] = "mutated"
+	if SectionNames()[0] != sectionCluster {
+		t.Error("SectionNames returned an aliased slice; a caller can rewrite the section order")
+	}
 }
 
 func TestFinalizeEmitsEverySectionEvenWhenSkipped(t *testing.T) {
