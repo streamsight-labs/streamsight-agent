@@ -147,6 +147,26 @@ const (
 	// otherwise guessed from a run of zero end-offset deltas, which cannot tell
 	// a silent topic from a missed cycle.
 	DefaultCollectMaxTimestamp = true
+	// DefaultMaxTimestampEvery samples once a minute at the 5s interval.
+	//
+	// It is the only offset flavour that is NOT O(1) on the broker. -1 and -2
+	// read logEndOffset and logStartOffset, numbers already in memory; -3
+	// (MAX_TIMESTAMP, KIP-734) makes UnifiedLog.fetchOffsetByTimestamp walk every
+	// local segment comparing cached maxTimestampSoFar, then on Kafka 3.8+ do an
+	// index lookup and scan the winning batch -- work that can reach page cache.
+	// At 390 partitions, every cycle is 6.7M segment walks a day; this is 560k.
+	//
+	// MEASURED, docs/ARCHITECTURE.md Open item 1: partitions[].max_timestamp
+	// is 77.7 B per partition raw and 18.91% of the gzipped steady batch, the
+	// largest single field the agent adds and one gzip cannot fold -- each value
+	// is a distinct wide integer.
+	//
+	// A minute is the right cadence because of what the field ANSWERS: "when was
+	// the last record written". Nobody alerts on a topic that went quiet five
+	// seconds ago -- that is indistinguishable from ordinary traffic. They alert
+	// on ten minutes. The cost of the cadence is that the answer is up to 60s
+	// stale, which is well inside the resolution of the question.
+	DefaultMaxTimestampEvery = 12
 	// DefaultCollectTieredOffsets is OFF. On a cluster without remote storage
 	// the local log start is always equal to the log start already collected, so
 	// it is a round trip per cycle for a duplicate answer.
@@ -277,6 +297,7 @@ type Config struct {
 	CollectConfigs          bool
 	ConfigsEvery            int
 	CollectMaxTimestamp     bool
+	MaxTimestampEvery       int
 	CollectTieredOffsets    bool
 	CollectLatestTiered     bool
 	CollectShareGroups      bool
@@ -433,6 +454,10 @@ func Load() (*Config, error) {
 	}
 
 	c.CollectMaxTimestamp = p.boolean("COLLECT_MAX_TIMESTAMP", DefaultCollectMaxTimestamp)
+	c.MaxTimestampEvery = p.integer("MAX_TIMESTAMP_EVERY", DefaultMaxTimestampEvery)
+	if c.MaxTimestampEvery < 1 {
+		p.errf("MAX_TIMESTAMP_EVERY must be >= 1 (1 = every cycle), got %d", c.MaxTimestampEvery)
+	}
 	c.CollectTieredOffsets = p.boolean("COLLECT_TIERED_OFFSETS", DefaultCollectTieredOffsets)
 	c.CollectLatestTiered = p.boolean("COLLECT_LATEST_TIERED", DefaultCollectLatestTiered)
 	c.CollectShareGroups = p.boolean("COLLECT_SHARE_GROUPS", DefaultCollectShareGroups)
@@ -629,7 +654,11 @@ func (c *Config) Redacted() string {
 	if c.CollectThroughputWindow {
 		fmt.Fprintf(&b, " throughput_window=%s throughput_window_every=%d", c.ThroughputWindow, c.ThroughputWindowEvery)
 	}
-	fmt.Fprintf(&b, " collect_max_timestamp=%t collect_tiered_offsets=%t", c.CollectMaxTimestamp, c.CollectTieredOffsets)
+	fmt.Fprintf(&b, " collect_max_timestamp=%t", c.CollectMaxTimestamp)
+	if c.CollectMaxTimestamp {
+		fmt.Fprintf(&b, " max_timestamp_every=%d", c.MaxTimestampEvery)
+	}
+	fmt.Fprintf(&b, " collect_tiered_offsets=%t", c.CollectTieredOffsets)
 	// CollectLatestTiered is subordinate to CollectTieredOffsets, not an
 	// independent phase: it is ignored when the parent is off, so printing it
 	// there would advertise a setting with no effect.

@@ -140,7 +140,7 @@ and in wall-clock at the default `COLLECTION_INTERVAL` of **5s**.
 | Phase | Requests |
 |---|---|
 | `cluster` | 1 `Metadata`, all topics |
-| `topics` / `topics_lso` / `topics_end` / `topics_max_timestamp` | **4** × `ListOffsets` fanned out to leaders at the defaults — start (`-2`), committed (`-1` at `READ_COMMITTED`, `COLLECT_LAST_STABLE_OFFSET`, on), end (`-1`), max-timestamp (`-3`, `COLLECT_MAX_TIMESTAMP`, on) — each preceded by a `ListTopics` inside kadm. 2 with both of those turned off. Every flavour is the same API key with a different timestamp sentinel, so none of them adds an ACL |
+| `topics` / `topics_lso` / `topics_end` / `topics_max_timestamp` | **4** × `ListOffsets` fanned out to leaders at the defaults — start (`-2`), committed (`-1` at `READ_COMMITTED`, `COLLECT_LAST_STABLE_OFFSET`, on), end (`-1`), max-timestamp (`-3`, `COLLECT_MAX_TIMESTAMP`, on, **every `MAX_TIMESTAMP_EVERY`=12 cycles**) — each preceded by a `ListTopics` inside kadm. 2 with both of those turned off. Every flavour is the same API key with a different timestamp sentinel, so none of them adds an ACL |
 | `groups` | `DescribeGroups` sharded by coordinator, one `ListGroups` broadcast shared with `offsets` and `share_groups`, and — on Kafka 4.0+ with `COLLECT_CONSUMER_GROUPS` (on by default) — a second coordinator-sharded `ConsumerGroupDescribe` overlay. Below 4.0 the capability gate removes that one at startup, so it is never a per-cycle cost on a cluster that cannot serve it |
 | `offsets` | one batched `OffsetFetch` sharded by coordinator — O(brokers), not O(groups) |
 

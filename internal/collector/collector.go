@@ -118,6 +118,13 @@ type Options struct {
 	// cadence in the agent.
 	ConfigsEvery int
 
+	// MaxTimestampEvery runs the max-timestamp phase on every Nth cycle; below 1
+	// means every cycle. It is cadenced for two independent reasons: it is the
+	// only ListOffsets sentinel that is O(local segments) rather than O(1) on
+	// the broker, and its per-partition object is the largest single field the
+	// agent adds. Topic liveness does not change on a 5s scale.
+	MaxTimestampEvery int
+
 	// CollectReassignments asks the controller which under-replicated partitions
 	// are moving on purpose. It costs nothing in steady state — the request is
 	// issued only when a URP is observed — so it defaults on.
@@ -283,9 +290,10 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 	// cadenced phase on its first cycle rather than N intervals in.
 	n := c.cycle.Add(1) - 1
 	var (
-		runWindow = runsThisCycle(c.opts.CollectThroughputWindow, c.opts.ThroughputWindowEvery, n)
-		runDirs   = runsThisCycle(c.opts.CollectLogDirs, c.opts.LogDirsEvery, n)
-		runCfg    = runsThisCycle(c.opts.CollectConfigs, c.opts.ConfigsEvery, n)
+		runWindow = runsThisCycle(c.opts.CollectThroughputWindow, c.opts.ThroughputWindowEvery, phaseWindow, n)
+		runDirs   = runsThisCycle(c.opts.CollectLogDirs, c.opts.LogDirsEvery, phaseLogDirs, n)
+		runCfg    = runsThisCycle(c.opts.CollectConfigs, c.opts.ConfigsEvery, phaseConfigs, n)
+		runMaxTS  = runsThisCycle(c.opts.CollectMaxTimestamp, c.opts.MaxTimestampEvery, phaseMaxTS, n)
 	)
 
 	wg.Add(11)
@@ -336,7 +344,7 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		defer wg.Done()
 		defer close(endDone)
 		<-metaDone
-		topics, topicSecs = c.collectTopics(ctx, topicDetails, committedDone, windowDone)
+		topics, topicSecs = c.collectTopics(ctx, topicDetails, runMaxTS, committedDone, windowDone)
 	}()
 
 	// Log directories, on their own cadence.
@@ -477,10 +485,35 @@ func (c *Collector) finalize(batch *metrics.Batch, secs []*section, groupsDroppe
 	}
 }
 
+// Phase offsets, so the cadenced phases never sample on the same cycle.
+//
+// They share one counter, and the default periods divide one another --
+// MAX_TIMESTAMP_EVERY 12, LOG_DIRS_EVERY 24, CONFIGS_EVERY 360 -- so without an
+// offset every configs cycle would also be a log-dirs cycle AND a max-timestamp
+// cycle. That stacks the largest response, the slowest request and the only
+// segment-walking ListOffsets into one 4s collection budget, produces a periodic
+// payload spike instead of an amortised cost, and lands on the same cycle across
+// a whole fleet started together.
+//
+// These particular values are chosen so that at the shipped defaults NO TWO
+// PHASES EVER COINCIDE -- 12k+2, 24k+0 and 360k+5 are pairwise disjoint, which
+// TestCadencedPhasesNeverCoincide proves by exhaustion over a full period. They
+// cost each phase a first sample a few cycles in rather than on cycle 0; a
+// crash-looping agent no longer re-issues every expensive phase on every
+// restart, which is the same property read the other way.
+const (
+	phaseLogDirs uint64 = 0
+	phaseMaxTS   uint64 = 2
+	phaseConfigs uint64 = 5
+	// phaseWindow is 0: the window defaults to every cycle, where an offset is
+	// meaningless, and it is off by default in any case.
+	phaseWindow uint64 = 0
+)
+
 // runsThisCycle reports whether a cadenced phase samples on cycle n, which is
-// 0-based.
-func runsThisCycle(enabled bool, every int, n uint64) bool {
-	return enabled && n%everyNth(every) == 0
+// 0-based. offset staggers a phase against the others; see the block above.
+func runsThisCycle(enabled bool, every int, offset uint64, n uint64) bool {
+	return enabled && (n+offset)%everyNth(every) == 0
 }
 
 // everyNth clamps a cadence to at least one; zero would panic the modulo.

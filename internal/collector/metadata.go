@@ -70,7 +70,7 @@ func (c *Collector) collectCluster(ctx context.Context) (*metrics.ClusterMetrics
 // ListOffsetsAfterMilli is the earlier edge of a record count that ends at the
 // high watermark. Each is a channel the owning goroutine closes when its
 // request has returned.
-func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, before ...<-chan struct{}) ([]metrics.TopicMetrics, topicSections) {
+func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, runMaxTS bool, before ...<-chan struct{}) ([]metrics.TopicMetrics, topicSections) {
 	sec := c.newSection(sectionTopics)
 	defer sec.stop()
 
@@ -165,7 +165,10 @@ func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, be
 		maxTS   kadm.ListedOffsets
 		maxTSOK bool
 	)
-	if c.opts.CollectMaxTimestamp {
+	// Cadenced, not per-cycle: see Options.MaxTimestampEvery. The section is
+	// still emitted on the cycles it skips, so "not sampled this cycle" and
+	// "sampled, the broker had nothing" stay different answers.
+	if runMaxTS {
 		maxTS, err = c.client.Admin.ListMaxTimestampOffsets(ctx, names...)
 		maxTSOK = maxTSSec.requestPartial("ListMaxTimestampOffsets", err, len(maxTS) > 0)
 	} else {

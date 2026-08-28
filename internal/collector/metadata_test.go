@@ -404,7 +404,7 @@ func TestCollectTopicsAlwaysReturnsThreeSections(t *testing.T) {
 			closed := make(chan struct{})
 			close(closed)
 
-			topics, secs := c.collectTopics(context.Background(), tt.tds, closed)
+			topics, secs := c.collectTopics(context.Background(), tt.tds, c.opts.CollectMaxTimestamp, closed)
 
 			if topics != nil {
 				t.Errorf("topics = %+v, want none", topics)

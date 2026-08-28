@@ -167,6 +167,16 @@ collection:
   # minutes at the 5s interval. Rendered only when collectLogDirs is true.
   logDirsEvery: ""
 
+  # MAX_TIMESTAMP_EVERY -- run the max-timestamp phase every Nth cycle. Must be
+  # >= 1. Empty uses the agent default, currently 12 = once a minute at the 5s
+  # interval. Cadenced because it is the only ListOffsets sentinel that is NOT
+  # O(1) on the broker (-3 walks every local log segment, unlike -1/-2 which
+  # read a number already in memory) and because partitions[].max_timestamp is
+  # ~19% of the gzipped batch. It answers "when was the last record written",
+  # which is a minutes-scale question. Set to 1 only if you genuinely need
+  # 5-second liveness resolution and have measured the broker cost.
+  maxTimestampEvery: ""
+
   # COLLECT_CONFIGS -- adds topic_configs[] and broker_configs[]. On by
   # default, and the only collector needing an ACL outside the three DESCRIBE
   # grants: DESCRIBE_CONFIGS on TOPIC and on CLUSTER. Missing either is not

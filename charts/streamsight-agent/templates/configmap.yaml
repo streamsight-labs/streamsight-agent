@@ -71,6 +71,9 @@ data:
   LOG_DIRS_EVERY: {{ . | int | quote }}
   {{- end }}
   {{- end }}
+  {{- with .Values.collection.maxTimestampEvery }}
+  MAX_TIMESTAMP_EVERY: {{ . | int | quote }}
+  {{- end }}
   COLLECT_CONFIGS: {{ .Values.collection.collectConfigs | quote }}
   {{- if .Values.collection.collectConfigs }}
   {{- with .Values.collection.configsEvery }}

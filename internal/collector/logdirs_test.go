@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -554,7 +555,7 @@ func TestLogDirsCadence(t *testing.T) {
 	var ran []int
 	for i := 0; i < 7; i++ {
 		n := c.cycle.Add(1) - 1
-		if runsThisCycle(c.opts.CollectLogDirs, c.opts.LogDirsEvery, n) {
+		if runsThisCycle(c.opts.CollectLogDirs, c.opts.LogDirsEvery, phaseLogDirs, n) {
 			ran = append(ran, i)
 		}
 	}
@@ -565,6 +566,83 @@ func TestLogDirsCadence(t *testing.T) {
 	for i := range want {
 		if ran[i] != want[i] {
 			t.Fatalf("ran on %v, want %v", ran, want)
+		}
+	}
+}
+
+// The offsets exist so the heavy phases never land in one collection budget.
+// This proves it by exhaustion rather than by argument: over a full period of
+// the three default cadences, no cycle runs two of them.
+func TestCadencedPhasesNeverCoincide(t *testing.T) {
+	const (
+		maxTSEvery   = 12  // config.DefaultMaxTimestampEvery
+		logDirsEvery = 24  // config.DefaultLogDirsEvery
+		configsEvery = 360 // config.DefaultConfigsEvery
+	)
+
+	// lcm(12, 24, 360) = 360, so one period of 360 cycles covers every
+	// alignment the three can ever reach.
+	for n := uint64(0); n < 360; n++ {
+		var ran []string
+		if runsThisCycle(true, maxTSEvery, phaseMaxTS, n) {
+			ran = append(ran, "max_timestamp")
+		}
+		if runsThisCycle(true, logDirsEvery, phaseLogDirs, n) {
+			ran = append(ran, "log_dirs")
+		}
+		if runsThisCycle(true, configsEvery, phaseConfigs, n) {
+			ran = append(ran, "configs")
+		}
+		if len(ran) > 1 {
+			t.Errorf("cycle %d runs %v together; the phase offsets are supposed to keep them apart", n, ran)
+		}
+	}
+
+	// And each still runs at its stated rate over that period: the offsets
+	// stagger the phases without changing how often they sample.
+	for _, tt := range []struct {
+		name   string
+		every  int
+		offset uint64
+		want   int
+	}{
+		{"max_timestamp", maxTSEvery, phaseMaxTS, 360 / maxTSEvery},
+		{"log_dirs", logDirsEvery, phaseLogDirs, 360 / logDirsEvery},
+		{"configs", configsEvery, phaseConfigs, 360 / configsEvery},
+	} {
+		var got int
+		for n := uint64(0); n < 360; n++ {
+			if runsThisCycle(true, tt.every, tt.offset, n) {
+				got++
+			}
+		}
+		if got != tt.want {
+			t.Errorf("%s ran %d times in 360 cycles, want %d", tt.name, got, tt.want)
+		}
+	}
+}
+
+// The max-timestamp phase is the reason the cadence was added: it is the only
+// ListOffsets sentinel that is not O(1) on the broker, and its per-partition
+// object is the largest single field the agent ships.
+func TestMaxTimestampCadence(t *testing.T) {
+	c := &Collector{opts: Options{CollectMaxTimestamp: true, MaxTimestampEvery: 12}}
+
+	var ran []uint64
+	for n := uint64(0); n < 26; n++ {
+		if runsThisCycle(c.opts.CollectMaxTimestamp, c.opts.MaxTimestampEvery, phaseMaxTS, n) {
+			ran = append(ran, n)
+		}
+	}
+	if want := []uint64{10, 22}; !slices.Equal(ran, want) {
+		t.Errorf("sampled on cycles %v, want %v", ran, want)
+	}
+
+	// Off means off, whatever the cadence says.
+	off := &Collector{opts: Options{CollectMaxTimestamp: false, MaxTimestampEvery: 1}}
+	for n := uint64(0); n < 5; n++ {
+		if runsThisCycle(off.opts.CollectMaxTimestamp, off.opts.MaxTimestampEvery, phaseMaxTS, n) {
+			t.Fatalf("cycle %d sampled with COLLECT_MAX_TIMESTAMP off", n)
 		}
 	}
 }

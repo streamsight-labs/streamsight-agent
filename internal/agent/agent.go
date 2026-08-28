@@ -212,6 +212,7 @@ func collectorOptions(cfg *config.Config, logger *slog.Logger) collector.Options
 		CollectConfigs:          cfg.CollectConfigs,
 		ConfigsEvery:            cfg.ConfigsEvery,
 		CollectMaxTimestamp:     cfg.CollectMaxTimestamp,
+		MaxTimestampEvery:       cfg.MaxTimestampEvery,
 		CollectTieredOffsets:    cfg.CollectTieredOffsets,
 		CollectLatestTiered:     cfg.CollectLatestTiered,
 		CollectShareGroups:      cfg.CollectShareGroups,
