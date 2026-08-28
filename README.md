@@ -724,9 +724,7 @@ docker run --rm -v "$PWD/scripts:/scripts:ro" --network host \
   /scripts/setup-kafka-user.sh -b localhost:9092 -p <agent-password>
 ```
 
-The script creates the SCRAM credential and all five ACLs. Pass `--no-configs` to skip the
-two `DESCRIBE_CONFIGS` grants on a cluster whose policy forbids them, and set
-`COLLECT_CONFIGS=false` on the agent to match. It handles both CLI naming
+The script creates the SCRAM credential and all five ACLs. It handles both CLI naming
 conventions (`kafka-acls.sh` in the Apache tarball, `kafka-acls` in the Confluent and
 Bitnami images). `-h` lists every option; `-n` is a dry run that prints exactly what would
 be granted, and `-c <admin.properties>` is not optional on a secured cluster — without

@@ -6,11 +6,10 @@
 # All five are read-only. DESCRIBE_CONFIGS permits READING configuration; it is
 # not ALTER_CONFIGS and cannot change anything.
 #
-# --no-configs drops the two DESCRIBE_CONFIGS grants for a cluster whose policy
-# will not allow them. The agent still runs: those two sections report
-# `unauthorized` and nothing else degrades. It does mean consumer lag on any
-# COMPACTED topic is overstated by an unknowable amount and cannot be flagged as
-# such, because cleanup.policy is the only thing that identifies those topics.
+# All five are required. DESCRIBE_CONFIGS is what makes cleanup.policy visible,
+# and cleanup.policy is the only thing that identifies a compacted topic -- on
+# one, the offset range is not a record count, so consumer lag is overstated by
+# an unknowable amount and cannot even be flagged as unreliable.
 #
 # Usage: ./setup-kafka-user.sh -p <password> [options]
 #
@@ -22,7 +21,6 @@ PASSWORD="${KAFKA_PASSWORD:-}"
 MECHANISM="${KAFKA_SASL_MECHANISM:-SCRAM-SHA-512}"
 COMMAND_CONFIG="${KAFKA_COMMAND_CONFIG:-}"
 DRY_RUN=false
-WITH_CONFIGS=true
 
 print_usage() {
     cat << EOF
@@ -39,13 +37,6 @@ Options:
     -m, --mechanism         SCRAM-SHA-256 or SCRAM-SHA-512 (default: SCRAM-SHA-512)
     -c, --command-config    Properties file with the ADMIN credentials the CLI
                             uses to connect. Required on any secured cluster.
-    --no-configs            Skip the two DESCRIBE_CONFIGS grants. Only for a
-                            cluster whose policy forbids them. Costs you:
-                            cleanup.policy (without it, lag on compacted topics
-                            is wrong and unflaggable) and min.insync.replicas
-                            (without it, "degraded" cannot be told from
-                            "producers are failing right now"). Set
-                            COLLECT_CONFIGS=false on the agent to match.
     -n, --dry-run           Print the commands instead of running them
     -h, --help              Show this help
 
@@ -56,7 +47,6 @@ Environment variables:
 Examples:
     $0 -p my-secret-password
     $0 -b kafka.example.com:9093 -p my-secret-password -c /path/to/admin.properties
-    $0 -p my-secret-password --no-configs
     $0 -p x -n                      # show exactly what would be granted
 
 Requires the Kafka CLI tools on PATH. Both naming conventions are supported:
@@ -71,7 +61,6 @@ while [[ $# -gt 0 ]]; do
         -p|--password)         PASSWORD="$2"; shift 2 ;;
         -m|--mechanism)        MECHANISM="$2"; shift 2 ;;
         -c|--command-config)   COMMAND_CONFIG="$2"; shift 2 ;;
-        --no-configs)          WITH_CONFIGS=false; shift ;;
         -n|--dry-run)          DRY_RUN=true; shift ;;
         -h|--help)             print_usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; print_usage; exit 1 ;;
@@ -95,6 +84,10 @@ resolve_tool() {
     if command -v "${base}.sh" > /dev/null 2>&1; then
         echo "${base}.sh"
     elif command -v "$base" > /dev/null 2>&1; then
+        echo "$base"
+    elif [[ "$DRY_RUN" == true ]]; then
+        # A dry run prints commands and executes nothing, so the tools need not
+        # be installed: this is the form you hand a platform team for review.
         echo "$base"
     else
         echo "Error: neither ${base}.sh nor ${base} is on PATH." >&2
@@ -122,14 +115,8 @@ run() {
 echo "Bootstrap server: $BOOTSTRAP_SERVER"
 echo "Username:         $USERNAME"
 echo "Mechanism:        $MECHANISM"
-if $WITH_CONFIGS; then
-    echo "Config grants:    yes (DESCRIBE_CONFIGS on TOPIC and CLUSTER)"
-    TOTAL=6
-else
-    echo "Config grants:    NO -- set COLLECT_CONFIGS=false on the agent to match."
-    echo "                  Lag on compacted topics will be wrong and unflaggable."
-    TOTAL=4
-fi
+echo "Config grants:    DESCRIBE_CONFIGS on TOPIC and CLUSTER"
+TOTAL=6
 echo
 
 echo "[1/$TOTAL] Creating SASL user..."
@@ -165,22 +152,20 @@ run "$KAFKA_ACLS" "${COMMON_ARGS[@]}" \
     --group '*' \
     --resource-pattern-type literal
 
-if $WITH_CONFIGS; then
-    echo "[5/$TOTAL] Granting DESCRIBE_CONFIGS on all TOPICs..."
-    run "$KAFKA_ACLS" "${COMMON_ARGS[@]}" \
-        --add \
-        --allow-principal "User:$USERNAME" \
-        --operation DESCRIBE_CONFIGS \
-        --topic '*' \
-        --resource-pattern-type literal
+echo "[5/$TOTAL] Granting DESCRIBE_CONFIGS on all TOPICs..."
+run "$KAFKA_ACLS" "${COMMON_ARGS[@]}" \
+    --add \
+    --allow-principal "User:$USERNAME" \
+    --operation DESCRIBE_CONFIGS \
+    --topic '*' \
+    --resource-pattern-type literal
 
-    echo "[6/$TOTAL] Granting DESCRIBE_CONFIGS on CLUSTER..."
-    run "$KAFKA_ACLS" "${COMMON_ARGS[@]}" \
-        --add \
-        --allow-principal "User:$USERNAME" \
-        --operation DESCRIBE_CONFIGS \
-        --cluster
-fi
+echo "[6/$TOTAL] Granting DESCRIBE_CONFIGS on CLUSTER..."
+run "$KAFKA_ACLS" "${COMMON_ARGS[@]}" \
+    --add \
+    --allow-principal "User:$USERNAME" \
+    --operation DESCRIBE_CONFIGS \
+    --cluster
 
 echo
 echo "Done. Configure the agent with:"
@@ -190,9 +175,6 @@ echo "  KAFKA_SASL_MECHANISM=$MECHANISM"
 echo "  KAFKA_SASL_USERNAME=$USERNAME"
 echo "  KAFKA_SASL_PASSWORD=<the password you passed>"
 echo "  KAFKA_TLS_ENABLED=true    # if the listener is SASL_SSL"
-if ! $WITH_CONFIGS; then
-    echo "  COLLECT_CONFIGS=false     # no DESCRIBE_CONFIGS grant was created"
-fi
 echo
 echo "Verify with:"
 echo "  $KAFKA_ACLS ${COMMON_ARGS[*]} --list --principal User:$USERNAME"
