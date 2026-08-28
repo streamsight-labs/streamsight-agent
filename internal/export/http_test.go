@@ -53,8 +53,8 @@ func TestHTTPExporter_Export_Success(t *testing.T) {
 		if r.Header.Get("X-API-Key") != "test-key" {
 			t.Errorf("expected X-API-Key test-key")
 		}
-		if enc := r.Header.Get("Content-Encoding"); enc != "" {
-			t.Errorf("expected no Content-Encoding, got %q", enc)
+		if enc := r.Header.Get("Content-Encoding"); enc != "gzip" {
+			t.Errorf("expected Content-Encoding gzip, got %q", enc)
 		}
 		idempotency.Store(r.Header.Get("Idempotency-Key"))
 
@@ -128,7 +128,6 @@ func TestHTTPExporter_Export_Gzip(t *testing.T) {
 	exporter := NewHTTPExporter(HTTPExporterConfig{
 		Endpoint: server.URL,
 		APIKey:   "test-key",
-		Gzip:     true,
 	})
 
 	batch := &metrics.Batch{CollectedAt: time.Now()}
@@ -362,11 +361,7 @@ func TestHTTPExporter_Export_QueueFull(t *testing.T) {
 	var got []uint64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-release
-		body, _ := io.ReadAll(r.Body)
-		var b struct {
-			BatchSeq uint64 `json:"batch_seq"`
-		}
-		_ = json.Unmarshal(body, &b)
+		b := decodeBatch(t, r)
 		mu.Lock()
 		got = append(got, b.BatchSeq)
 		mu.Unlock()

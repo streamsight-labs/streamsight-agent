@@ -43,7 +43,6 @@ const (
 	DefaultExportMaxRetries = 3
 	DefaultExportBaseDelay  = time.Second
 	DefaultExportTimeout    = 10 * time.Second
-	DefaultExportGzip       = true
 	// DefaultExportEndpoint is the hosted ingest path. Self-hosted and on-prem
 	// deployments override it; the agent POSTs to this URL verbatim and appends
 	// no path of its own, so the route is a decision on the receiving side.
@@ -169,29 +168,9 @@ const (
 	// the local log start is always equal to the log start already collected, so
 	// it is a round trip per cycle for a duplicate answer.
 	DefaultCollectTieredOffsets = false
-	// DefaultCollectLatestTiered is ON, but it is subordinate: it is ignored
-	// unless COLLECT_TIERED_OFFSETS is also set. Separate because KIP-1005
-	// (Kafka 3.9) landed five releases after KIP-405 (3.4), so a 3.4-3.8 cluster
-	// serves the local start and not the remote end.
-	DefaultCollectLatestTiered = true
 	// DefaultCollectShareGroups is OFF. KIP-932 needs Kafka 4.0, and the phase
 	// has never been exercised against a broker that can answer it.
 	DefaultCollectShareGroups = false
-
-	// DefaultCollectReassignments is ON: the request is issued only when a URP is
-	// observed, so it costs nothing in steady state and is the difference between
-	// "a broker is failing" and "an operator is rebalancing".
-	DefaultCollectReassignments = true
-
-	// DefaultCollectEpochProbes is ON for the same reason: nothing is issued
-	// until a committed leader epoch disagrees with the partition's current one,
-	// and it is the only positive proof of data loss the protocol offers.
-	DefaultCollectEpochProbes = true
-
-	// DefaultCollectRPCStats is ON because it is free: the counters come from
-	// hooks on requests the agent already sends, so the section costs no request
-	// and no ACL.
-	DefaultCollectRPCStats = true
 
 	// DefaultMaxErrors is the one cap that defaults ON. Behind deduplication
 	// errors[] is already bounded by the number of distinct failure modes, so
@@ -265,7 +244,6 @@ type Config struct {
 	ExportMaxRetries     int
 	ExportBaseDelay      time.Duration
 	ExportTimeout        time.Duration
-	ExportGzip           bool
 
 	CollectionInterval    time.Duration
 	CollectionTimeout     time.Duration
@@ -297,11 +275,7 @@ type Config struct {
 	CollectMaxTimestamp     bool
 	MaxTimestampEvery       int
 	CollectTieredOffsets    bool
-	CollectLatestTiered     bool
 	CollectShareGroups      bool
-	CollectReassignments    bool
-	CollectEpochProbes      bool
-	CollectRPCStats         bool
 
 	// Cardinality caps. Zero means unlimited for every entity cap; MaxErrors and
 	// MaxErrorSamples always have a positive default. They cap the batch, not
@@ -398,7 +372,6 @@ func Load() (*Config, error) {
 	if c.ExportTimeout <= 0 {
 		p.errf("EXPORT_TIMEOUT must be > 0, got %s", c.ExportTimeout)
 	}
-	c.ExportGzip = p.boolean("EXPORT_GZIP", DefaultExportGzip)
 
 	c.CollectionInterval = p.duration("COLLECTION_INTERVAL", DefaultInterval)
 	if c.CollectionInterval <= 0 {
@@ -457,17 +430,12 @@ func Load() (*Config, error) {
 		p.errf("MAX_TIMESTAMP_EVERY must be >= 1 (1 = every cycle), got %d", c.MaxTimestampEvery)
 	}
 	c.CollectTieredOffsets = p.boolean("COLLECT_TIERED_OFFSETS", DefaultCollectTieredOffsets)
-	c.CollectLatestTiered = p.boolean("COLLECT_LATEST_TIERED", DefaultCollectLatestTiered)
 	c.CollectShareGroups = p.boolean("COLLECT_SHARE_GROUPS", DefaultCollectShareGroups)
 	c.CollectConfigs = p.boolean("COLLECT_CONFIGS", DefaultCollectConfigs)
 	c.ConfigsEvery = p.integer("CONFIGS_EVERY", DefaultConfigsEvery)
 	if c.ConfigsEvery < 1 {
 		p.errf("CONFIGS_EVERY must be >= 1 (1 = every cycle), got %d", c.ConfigsEvery)
 	}
-
-	c.CollectReassignments = p.boolean("COLLECT_REASSIGNMENTS", DefaultCollectReassignments)
-	c.CollectEpochProbes = p.boolean("COLLECT_EPOCH_PROBES", DefaultCollectEpochProbes)
-	c.CollectRPCStats = p.boolean("COLLECT_RPC_STATS", DefaultCollectRPCStats)
 
 	// A negative cap has no meaning, unlike EXPORT_FILE_MAX_MB where it disables
 	// rotation.
@@ -628,8 +596,8 @@ func (c *Config) Redacted() string {
 		fmt.Fprintf(&b, " export_file_fsync=%t", c.ExportFileSync)
 	}
 	if c.ExportMode == ExportModeHTTP {
-		fmt.Fprintf(&b, " export_queue_size=%d export_max_retries=%d export_base_delay=%s export_timeout=%s export_gzip=%t",
-			c.ExportQueueSize, c.ExportMaxRetries, c.ExportBaseDelay, c.ExportTimeout, c.ExportGzip)
+		fmt.Fprintf(&b, " export_queue_size=%d export_max_retries=%d export_base_delay=%s export_timeout=%s",
+			c.ExportQueueSize, c.ExportMaxRetries, c.ExportBaseDelay, c.ExportTimeout)
 	}
 	fmt.Fprintf(&b, " collection_interval=%s collection_timeout=%s include_internal_topics=%t",
 		c.CollectionInterval, c.CollectionTimeout, c.IncludeInternalTopics)
@@ -657,18 +625,10 @@ func (c *Config) Redacted() string {
 		fmt.Fprintf(&b, " max_timestamp_every=%d", c.MaxTimestampEvery)
 	}
 	fmt.Fprintf(&b, " collect_tiered_offsets=%t", c.CollectTieredOffsets)
-	// CollectLatestTiered is subordinate to CollectTieredOffsets, not an
-	// independent phase: it is ignored when the parent is off, so printing it
-	// there would advertise a setting with no effect.
-	if c.CollectTieredOffsets {
-		fmt.Fprintf(&b, " collect_latest_tiered=%t", c.CollectLatestTiered)
-	}
 	fmt.Fprintf(&b, " collect_share_groups=%t collect_configs=%t", c.CollectShareGroups, c.CollectConfigs)
 	if c.CollectConfigs {
 		fmt.Fprintf(&b, " configs_every=%d", c.ConfigsEvery)
 	}
-	fmt.Fprintf(&b, " collect_reassignments=%t collect_epoch_probes=%t collect_rpc_stats=%t",
-		c.CollectReassignments, c.CollectEpochProbes, c.CollectRPCStats)
 	fmt.Fprintf(&b, " max_errors=%d max_error_samples=%d", c.MaxErrors, c.MaxErrorSamples)
 	// Only the caps that are set: five "=0" pairs on every startup line would
 	// bury the settings that matter.

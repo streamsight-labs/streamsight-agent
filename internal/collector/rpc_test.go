@@ -3,18 +3,20 @@ package collector
 import (
 	"testing"
 
+	"kafka-metrics-agent/internal/kafka"
 	"kafka-metrics-agent/internal/metrics"
 )
 
-// Off means skipped, not absent and not empty: an operator who turned the
-// section off must not look like an agent with no traffic. The nil client is
-// safe precisely because a disabled phase touches no client.
-func TestCollectRPCSkippedWhenDisabled(t *testing.T) {
-	c, err := New(nil, Options{})
+// There is no switch for this phase, so the only way it reports nothing is a
+// client whose hooks were never installed. That must read as skipped rather
+// than as an agent that sent no requests: "not measured" and "measured, no
+// traffic" are different facts about the cycle.
+func TestCollectRPCSkippedWhenTheHooksAreAbsent(t *testing.T) {
+	c, err := New(&kafka.Client{}, Options{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	stats, sec := c.collectRPC(false)
+	stats, sec := c.collectRPC()
 	if stats != nil {
 		t.Errorf("stats = %+v, want none", stats)
 	}

@@ -23,7 +23,6 @@ data:
   EXPORT_MAX_RETRIES: {{ .Values.export.http.maxRetries | int | quote }}
   EXPORT_BASE_DELAY: {{ .Values.export.http.baseDelay | quote }}
   EXPORT_TIMEOUT: {{ .Values.export.http.timeout | quote }}
-  EXPORT_GZIP: {{ .Values.export.http.gzip | quote }}
   {{- end }}
   {{- if eq $mode "file" }}
   EXPORT_FILE: {{ .Values.export.file.path | quote }}
@@ -94,13 +93,7 @@ data:
   {{- end }}
   {{- end }}
   COLLECT_TIERED_OFFSETS: {{ .Values.collection.collectTieredOffsets | quote }}
-  {{- if .Values.collection.collectTieredOffsets }}
-  COLLECT_LATEST_TIERED: {{ .Values.collection.collectLatestTiered | quote }}
-  {{- end }}
   COLLECT_SHARE_GROUPS: {{ .Values.collection.collectShareGroups | quote }}
-  COLLECT_REASSIGNMENTS: {{ .Values.collection.collectReassignments | quote }}
-  COLLECT_EPOCH_PROBES: {{ .Values.collection.collectEpochProbes | quote }}
-  COLLECT_RPC_STATS: {{ .Values.collection.collectRpcStats | quote }}
 
   # -- Cardinality caps ---------------------------------------------------
   # Only the caps that are set are rendered: the agent's own default for an

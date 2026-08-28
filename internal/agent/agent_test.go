@@ -350,12 +350,8 @@ func TestCollectorOptionsCarryEveryConfiguredSetting(t *testing.T) {
 		ConfigsEvery:            11,
 		CollectMaxTimestamp:     true,
 		CollectTieredOffsets:    true,
-		CollectLatestTiered:     true,
 		CollectShareGroups:      true,
 		MaxTimestampEvery:       12,
-		CollectReassignments:    true,
-		CollectEpochProbes:      true,
-		CollectRPCStats:         true,
 
 		MaxErrors:             11,
 		MaxErrorSamples:       2,

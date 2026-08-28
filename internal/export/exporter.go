@@ -81,7 +81,6 @@ type Config struct {
 	MaxRetries int
 	BaseDelay  time.Duration
 	Timeout    time.Duration
-	Gzip       bool
 
 	// File.
 	Path       string
@@ -108,7 +107,6 @@ func New(cfg Config) (Exporter, error) {
 			MaxRetries: cfg.MaxRetries,
 			BaseDelay:  cfg.BaseDelay,
 			Timeout:    cfg.Timeout,
-			Gzip:       cfg.Gzip,
 		}), nil
 
 	case ModeFile:

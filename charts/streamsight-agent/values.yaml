@@ -84,8 +84,6 @@ export:
     baseDelay: "1s"
     # EXPORT_TIMEOUT -- per-request deadline.
     timeout: "10s"
-    # EXPORT_GZIP
-    gzip: true
 
   file:
     # Writable mount point for file mode. The container root filesystem is
@@ -221,12 +219,11 @@ collection:
   # on a tiered cluster includes remote storage. OFF by default because on a
   # cluster without remote storage it costs a round trip to return the same
   # answer as start_offset. Needs Kafka 3.4+.
+  # The remote end offset (tiered.remote_end_offset, KIP-1005) always follows
+  # this switch -- there is no separate value for it. A 3.4-3.8 cluster serves
+  # the local start and not the remote end, and the startup capability probe is
+  # what notices, not the operator.
   collectTieredOffsets: false
-  # COLLECT_LATEST_TIERED -- additionally asks for tiered.remote_end_offset
-  # (KIP-1005). SUBORDINATE: ignored unless collectTieredOffsets is also true.
-  # Gated separately because KIP-1005 landed five releases after KIP-405, so a
-  # 3.4-3.8 cluster serves one and not the other. Needs Kafka 3.9+.
-  collectLatestTiered: true
 
   # COLLECT_SHARE_GROUPS -- adds the share_groups[] section (KIP-932). Share
   # groups are not consumer groups under another name: members share partitions
@@ -235,27 +232,17 @@ collection:
   # needs Kafka 4.0+.
   collectShareGroups: false
 
-  # COLLECT_REASSIGNMENTS -- adds reassignments[]. On by default and nearly
-  # free: the ListPartitionReassignments request is issued only on a cycle that
-  # already observed an under-replicated partition, so a healthy cluster pays
-  # nothing. Lets URP alerting subtract partitions that are moving on purpose.
-  collectReassignments: true
-
-  # COLLECT_EPOCH_PROBES -- adds epoch_probes[]. On by default for the same
-  # reason: OffsetForLeaderEpoch is issued only when a committed leader epoch
-  # disagrees with the partition's current one, and each distinct question is
-  # asked once per process lifetime.
-  collectEpochProbes: true
-
-  # COLLECT_RPC_STATS -- adds the agent.rpc section: per-broker, per-API-key
-  # request counts, bytes and latency histograms, as raw counters over a window
-  # rather than rates or percentiles. On by default because it issues NO extra
-  # requests -- the counters come from kgo hooks on traffic already happening.
+  # Three phases have no value here because they are always on, and each is
+  # capability-gated rather than operator-gated:
   #
-  # It is, however, the switch that costs PAYLOAD: the section grows with
-  # brokers x API keys and has no cap of its own. Measured at 4% of the batch on
-  # a 3-broker cluster; on a large fleet, check batch bytes before leaving it on.
-  collectRpcStats: true
+  #   reassignments[] -- ListPartitionReassignments is issued only on a cycle
+  #     that already observed an under-replicated partition, so a healthy
+  #     cluster pays one pass over a slice.
+  #   epoch_probes[]  -- OffsetForLeaderEpoch is issued only when a committed
+  #     leader epoch disagrees with the partition's current one, and each
+  #     distinct question is asked once per process lifetime.
+  #   agent.rpc       -- counters from kgo hooks on traffic already happening:
+  #     no request, no ACL, no broker work.
 
 # Cardinality caps: hard ceilings on what one batch may contain.
 #

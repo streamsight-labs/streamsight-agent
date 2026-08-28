@@ -13,17 +13,17 @@ import "kafka-metrics-agent/internal/metrics"
 // EXACTLY ONE CALLER PER CYCLE: the snapshot resets the window, so a second call
 // would silently halve the first's numbers.
 //
+// There is no switch for it: the counters come off traffic the agent sends
+// anyway, so it costs no request, no ACL and no broker work, and the only thing
+// an off position ever bought was a blind spot in the agent's own health.
+//
 // A nil snapshot means the hooks were never installed, which is reported as
 // skipped for the same reason every other phase does: "not measured" and
 // "measured, no traffic" are different facts.
-func (c *Collector) collectRPC(run bool) (*metrics.RPCStats, *section) {
+func (c *Collector) collectRPC() (*metrics.RPCStats, *section) {
 	sec := c.newSection(sectionBrokerRPC)
 	defer sec.stop()
 
-	if !run {
-		sec.downgrade(metrics.SectionSkipped)
-		return nil, sec
-	}
 	stats := c.client.RPCSnapshot()
 	if stats == nil {
 		sec.downgrade(metrics.SectionSkipped)

@@ -39,7 +39,6 @@ data:
   # EXPORT_MAX_RETRIES: "3"     # retries per batch on 408/429/5xx
   # EXPORT_BASE_DELAY: "1s"     # full-jitter backoff base
   # EXPORT_TIMEOUT: "10s"       # per-request deadline
-  # EXPORT_GZIP: "true"
 
   # -- Collection ---------------------------------------------------------
   # Left unset on purpose: the agent's own default (currently 5s) applies, and

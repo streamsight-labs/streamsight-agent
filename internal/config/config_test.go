@@ -29,7 +29,6 @@ var allKeys = []string{
 	"EXPORT_MAX_RETRIES",
 	"EXPORT_BASE_DELAY",
 	"EXPORT_TIMEOUT",
-	"EXPORT_GZIP",
 	"COLLECTION_INTERVAL",
 	"COLLECTION_TIMEOUT",
 	"INCLUDE_INTERNAL_TOPICS",
@@ -51,11 +50,7 @@ var allKeys = []string{
 	"COLLECT_MAX_TIMESTAMP",
 	"MAX_TIMESTAMP_EVERY",
 	"COLLECT_TIERED_OFFSETS",
-	"COLLECT_LATEST_TIERED",
 	"COLLECT_SHARE_GROUPS",
-	"COLLECT_REASSIGNMENTS",
-	"COLLECT_EPOCH_PROBES",
-	"COLLECT_RPC_STATS",
 	"MAX_ERRORS",
 	"MAX_ERROR_SAMPLES",
 	"MAX_TOPICS",
@@ -451,7 +446,7 @@ func TestLoadScalarParsing(t *testing.T) {
 		wantErr string
 	}{
 		{name: "bad int", env: base(map[string]string{"EXPORT_QUEUE_SIZE": "lots"}), wantErr: "EXPORT_QUEUE_SIZE"},
-		{name: "bad bool", env: base(map[string]string{"EXPORT_GZIP": "yes-please"}), wantErr: "EXPORT_GZIP"},
+		{name: "bad bool", env: base(map[string]string{"KAFKA_TLS_ENABLED": "yes-please"}), wantErr: "KAFKA_TLS_ENABLED"},
 		{name: "bad duration", env: base(map[string]string{"EXPORT_TIMEOUT": "ten"}), wantErr: "EXPORT_TIMEOUT"},
 		{name: "non positive queue", env: base(map[string]string{"EXPORT_QUEUE_SIZE": "0"}), wantErr: "EXPORT_QUEUE_SIZE must be > 0"},
 		{name: "negative retries", env: base(map[string]string{"EXPORT_MAX_RETRIES": "-1"}), wantErr: "EXPORT_MAX_RETRIES must be >= 0"},
@@ -494,7 +489,6 @@ func TestLoadDefaults(t *testing.T) {
 		{"ExportMaxRetries", cfg.ExportMaxRetries, DefaultExportMaxRetries},
 		{"ExportBaseDelay", cfg.ExportBaseDelay, DefaultExportBaseDelay},
 		{"ExportTimeout", cfg.ExportTimeout, DefaultExportTimeout},
-		{"ExportGzip", cfg.ExportGzip, DefaultExportGzip},
 		{"IncludeInternalTopics", cfg.IncludeInternalTopics, false},
 		{"CollectLastStableOffset", cfg.CollectLastStableOffset, DefaultCollectLSO},
 		{"CollectConsumerGroups", cfg.CollectConsumerGroups, DefaultCollectConsumerGroups},
@@ -508,11 +502,7 @@ func TestLoadDefaults(t *testing.T) {
 		{"CollectMaxTimestamp", cfg.CollectMaxTimestamp, DefaultCollectMaxTimestamp},
 		{"MaxTimestampEvery", cfg.MaxTimestampEvery, DefaultMaxTimestampEvery},
 		{"CollectTieredOffsets", cfg.CollectTieredOffsets, DefaultCollectTieredOffsets},
-		{"CollectLatestTiered", cfg.CollectLatestTiered, DefaultCollectLatestTiered},
 		{"CollectShareGroups", cfg.CollectShareGroups, DefaultCollectShareGroups},
-		{"CollectReassignments", cfg.CollectReassignments, DefaultCollectReassignments},
-		{"CollectEpochProbes", cfg.CollectEpochProbes, DefaultCollectEpochProbes},
-		{"CollectRPCStats", cfg.CollectRPCStats, DefaultCollectRPCStats},
 		{"MaxErrors", cfg.MaxErrors, DefaultMaxErrors},
 		{"MaxErrorSamples", cfg.MaxErrorSamples, DefaultMaxErrorSamples},
 		// 0 = unlimited; see DefaultMaxEntities.
@@ -764,9 +754,6 @@ func TestLoadOptionalCollectors(t *testing.T) {
 			"COLLECT_THROUGHPUT_WINDOW": "true",
 			"THROUGHPUT_WINDOW":         "10m",
 			"THROUGHPUT_WINDOW_EVERY":   "4",
-			"COLLECT_REASSIGNMENTS":     "false",
-			"COLLECT_EPOCH_PROBES":      "false",
-			"COLLECT_RPC_STATS":         "false",
 		}))
 		cfg, err := Load()
 		if err != nil {
@@ -775,8 +762,26 @@ func TestLoadOptionalCollectors(t *testing.T) {
 		if !cfg.CollectThroughputWindow || cfg.ThroughputWindow != 10*time.Minute || cfg.ThroughputWindowEvery != 4 {
 			t.Errorf("throughput window = %t/%s/%d", cfg.CollectThroughputWindow, cfg.ThroughputWindow, cfg.ThroughputWindowEvery)
 		}
-		if cfg.CollectReassignments || cfg.CollectEpochProbes || cfg.CollectRPCStats {
-			t.Errorf("triggered phases = %t/%t/%t", cfg.CollectReassignments, cfg.CollectEpochProbes, cfg.CollectRPCStats)
+	})
+
+	// The always-on phases have no environment key at all, so a deployment that
+	// still carries one from an older release must not silently look configured.
+	t.Run("the always-on phases take no environment key", func(t *testing.T) {
+		setEnv(t, base(map[string]string{
+			"COLLECT_REASSIGNMENTS": "false",
+			"COLLECT_EPOCH_PROBES":  "false",
+			"COLLECT_RPC_STATS":     "false",
+			"COLLECT_LATEST_TIERED": "false",
+		}))
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if strings.Contains(cfg.Redacted(), "collect_reassignments") ||
+			strings.Contains(cfg.Redacted(), "collect_epoch_probes") ||
+			strings.Contains(cfg.Redacted(), "collect_rpc_stats") ||
+			strings.Contains(cfg.Redacted(), "collect_latest_tiered") {
+			t.Errorf("a removed knob still reaches the startup line: %s", cfg.Redacted())
 		}
 	})
 
@@ -868,8 +873,6 @@ func TestRedactedShowsTheCadenceOnlyWhenItApplies(t *testing.T) {
 		"collect_tiered_offsets=false",
 		"collect_share_groups=false",
 		"collect_configs=true",
-		"collect_reassignments=true", "collect_epoch_probes=true",
-		"collect_rpc_stats=true",
 		// On by default, so its cadence IS in force and must be printed.
 		fmt.Sprintf("configs_every=%d", DefaultConfigsEvery),
 	} {
@@ -883,13 +886,6 @@ func TestRedactedShowsTheCadenceOnlyWhenItApplies(t *testing.T) {
 			t.Errorf("redacted output prints %q for a disabled phase: %s", unwanted, s)
 		}
 	}
-	// CollectLatestTiered is subordinate: it defaults ON but is ignored while
-	// the tiered phase is off, so printing it at the defaults would advertise a
-	// setting with no effect.
-	if strings.Contains(s, "collect_latest_tiered=") {
-		t.Errorf("redacted output prints the subordinate tiered switch while its parent is off: %s", s)
-	}
-
 	// The other direction: enabling a phase brings its cadence into the line,
 	// and disabling one that defaults on takes it back out.
 	setEnv(t, base(map[string]string{"COLLECT_THROUGHPUT_WINDOW": "true"}))
@@ -924,8 +920,8 @@ func TestRedactedShowsTheCadenceOnlyWhenItApplies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !strings.Contains(cfg.Redacted(), "collect_latest_tiered=true") {
-		t.Errorf("redacted output missing the subordinate switch once its parent is on: %s", cfg.Redacted())
+	if !strings.Contains(cfg.Redacted(), "collect_tiered_offsets=true") {
+		t.Errorf("redacted output missing the phase in force: %s", cfg.Redacted())
 	}
 }
 

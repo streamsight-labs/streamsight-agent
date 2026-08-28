@@ -93,7 +93,7 @@ func NewClient(cfg *config.Config, version string) (*Client, error) {
 
 	// Broker RPC health, measured on the traffic the agent already sends: zero
 	// extra requests and no extra ACL, so the accumulator is always installed
-	// and COLLECT_RPC_STATS decides only whether the section is shipped.
+	// and the section always ships. There is no switch for it.
 	rpc := newRPCHooks(time.Now())
 	opts = append(opts, kgo.WithHooks(rpc))
 

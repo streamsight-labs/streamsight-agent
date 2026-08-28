@@ -217,7 +217,6 @@ func TestCollectEmitsEverySectionInOrderAgainstADeadCluster(t *testing.T) {
 		ThroughputWindowWidth:   time.Minute,
 		CollectReassignments:    true,
 		CollectEpochProbes:      true,
-		CollectRPCStats:         true,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

@@ -63,7 +63,6 @@ services:
       EXPORT_MODE: http
       EXPORT_ENDPOINT: http://mock-ingest:8088/v1/batches
       API_KEY: local-dev-key
-      EXPORT_GZIP: "true"
       EXPORT_MAX_RETRIES: "5"
       EXPORT_BASE_DELAY: 500ms
       EXPORT_TIMEOUT: 5s
