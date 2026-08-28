@@ -10,13 +10,15 @@ import (
 
 // collectCluster issues the single metadata request the cycle is built on, and
 // hands back the raw topic details so the topics phase need not ask again.
-func (c *Collector) collectCluster(ctx context.Context) (metrics.ClusterMetrics, kadm.TopicDetails, *section) {
+func (c *Collector) collectCluster(ctx context.Context) (*metrics.ClusterMetrics, kadm.TopicDetails, *section) {
 	sec := c.newSection(sectionCluster)
 	defer sec.stop()
 
 	meta, err := c.client.Admin.Metadata(ctx)
 	if !sec.request("Metadata", err) {
-		return metrics.ClusterMetrics{}, nil, sec
+		// Nil, not a zero struct: see metrics.Batch.Cluster. An empty
+		// ClusterMetrics would ship broker_count 0 as though it were measured.
+		return nil, nil, sec
 	}
 
 	brokers := make([]metrics.Broker, 0, len(meta.Brokers))
@@ -29,9 +31,16 @@ func (c *Collector) collectCluster(ctx context.Context) (metrics.ClusterMetrics,
 		})
 	}
 
-	cluster := metrics.ClusterMetrics{
+	// meta.Controller is deliberately not carried. On KRaft the broker answers
+	// MetadataResponse.controller_id from getRandomAliveBrokerId -- a random live
+	// broker chosen so pre-KIP-500 clients have somewhere to route admin
+	// requests, NOT the quorum leader. Measured on this project's own captures it
+	// changes on roughly two of every three consecutive healthy batches, which at
+	// a 5s interval is ~11,500 fabricated controller-change events a day. It was
+	// also the only field making the cluster section non-static. If a real
+	// controller identity is ever wanted, DescribeQuorum (KIP-642) has it.
+	cluster := &metrics.ClusterMetrics{
 		ID:          meta.Cluster,
-		Controller:  meta.Controller,
 		BrokerCount: len(brokers),
 		Brokers:     brokers,
 	}

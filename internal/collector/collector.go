@@ -249,7 +249,7 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		committedDone = make(chan struct{})
 		endDone       = make(chan struct{})
 
-		cluster      metrics.ClusterMetrics
+		cluster      *metrics.ClusterMetrics
 		topicDetails kadm.TopicDetails
 
 		groupIDs      []string

@@ -32,8 +32,14 @@ const (
 	DefaultExportMaxBackups = 3
 	// DefaultExportFileSync is off: a flush already survives the process dying,
 	// and only power loss or a kernel panic needs a device round trip.
-	DefaultExportFileSync   = false
-	DefaultExportQueueSize  = 100
+	DefaultExportFileSync = false
+	// DefaultExportQueueSize is 20 batches = 100 seconds at the 5s interval.
+	// The queue holds ENCODED bodies and evicts the OLDEST on overflow, so it is
+	// a stall absorber rather than an outage archive: 100s covers the worst-case
+	// retry chain for one batch, and metrics older than that have been overtaken
+	// by fresher ones. Sizing it in batches means its wall-clock depth moves with
+	// COLLECTION_INTERVAL.
+	DefaultExportQueueSize  = 20
 	DefaultExportMaxRetries = 3
 	DefaultExportBaseDelay  = time.Second
 	DefaultExportTimeout    = 10 * time.Second

@@ -72,9 +72,12 @@ export:
     # over .apiKey.
     existingSecret: ""
     existingSecretKey: "API_KEY"
-    # EXPORT_QUEUE_SIZE -- bounded in-memory queue; overflow drops the batch
-    # rather than stalling collection.
-    queueSize: 100
+    # EXPORT_QUEUE_SIZE -- bounded in-memory queue of ENCODED bodies. The
+    # enqueue never blocks; an overflow evicts the OLDEST queued batch, so what
+    # survives a slow ingest is the most recent picture of the cluster. 20 is
+    # 100 seconds at the 5s interval, which covers the worst-case retry chain
+    # for one batch -- it is a stall absorber, not an outage archive.
+    queueSize: 20
     # EXPORT_MAX_RETRIES -- retries per batch on 408/429/5xx.
     maxRetries: 3
     # EXPORT_BASE_DELAY -- full-jitter backoff base.

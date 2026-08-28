@@ -51,7 +51,7 @@ broker_configs[].configs[].sensitive bool omitempty
 broker_configs[].configs[].source string omitempty
 broker_configs[].configs[].value *string nullable
 broker_configs[].error_code int16 omitempty
-cluster metrics.ClusterMetrics
+cluster *metrics.ClusterMetrics nullable omitempty
 cluster.broker_count int
 cluster.brokers []metrics.Broker
 cluster.brokers[].host string
@@ -66,7 +66,6 @@ cluster.capabilities.brokers[].software_version string omitempty
 cluster.capabilities.features map[string]bool
 cluster.capabilities.mixed_versions bool
 cluster.capabilities.software_versions []string
-cluster.controller int32
 cluster.id string
 collected_at time.Time
 collection_ms int64

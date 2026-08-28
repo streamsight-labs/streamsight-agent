@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -356,8 +358,18 @@ func TestHTTPExporter_Close_DrainsQueue(t *testing.T) {
 
 func TestHTTPExporter_Export_QueueFull(t *testing.T) {
 	release := make(chan struct{})
+	var mu sync.Mutex
+	var got []uint64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-release
+		body, _ := io.ReadAll(r.Body)
+		var b struct {
+			BatchSeq uint64 `json:"batch_seq"`
+		}
+		_ = json.Unmarshal(body, &b)
+		mu.Lock()
+		got = append(got, b.BatchSeq)
+		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -368,19 +380,19 @@ func TestHTTPExporter_Export_QueueFull(t *testing.T) {
 		QueueSize: 2,
 	})
 
-	var dropped int
-	for i := 0; i < 8; i++ {
-		if err := exporter.Export(context.Background(), &metrics.Batch{CollectedAt: time.Now()}); errors.Is(err, ErrQueueFull) {
-			dropped++
+	// The newest batch is always accepted, so Export never reports a full queue
+	// to its caller: the batch it was handed IS queued. What was lost is an
+	// older batch, and that is reported through the counters instead -- the
+	// agent logs "export failed" on a returned error, which would be a lie here.
+	for i := uint64(0); i < 8; i++ {
+		if err := exporter.Export(context.Background(), &metrics.Batch{BatchSeq: i, CollectedAt: time.Now()}); err != nil {
+			t.Fatalf("Export(seq %d) = %v, want nil: drop-oldest accepts the incoming batch", i, err)
 		}
 	}
 
-	if dropped == 0 {
-		t.Fatal("expected at least one ErrQueueFull drop with a 2-slot queue")
-	}
 	stats := exporter.Stats()
-	if stats.BatchesDropped != uint64(dropped) {
-		t.Errorf("expected %d dropped in stats, got %d", dropped, stats.BatchesDropped)
+	if stats.BatchesDropped == 0 {
+		t.Fatal("expected evictions with a 2-slot queue and a blocked server")
 	}
 	// LastError is a string on the wire, not an error, so this is a plain
 	// comparison against the message rather than errors.Is.
@@ -390,6 +402,62 @@ func TestHTTPExporter_Export_QueueFull(t *testing.T) {
 
 	close(release)
 	exporter.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	// THE POINT OF THE POLICY: what survives is the newest. One batch is in
+	// flight and the queue holds the last two, so the final batch must arrive
+	// and an early one must not. Under drop-newest this assertion inverts.
+	if !slices.Contains(got, 7) {
+		t.Errorf("newest batch (seq 7) was dropped; delivered %v", got)
+	}
+	if slices.Contains(got, 3) {
+		t.Errorf("a superseded batch (seq 3) was delivered instead of being evicted; delivered %v", got)
+	}
+	if len(got) > 3 {
+		t.Errorf("delivered %d batches, want at most 3 (1 in flight + 2 queued): %v", len(got), got)
+	}
+}
+
+// The retry budget is what stops one wedged batch from occupying the single
+// worker while the queue behind it turns over.
+func TestHTTPExporter_RetryBudgetAbandonsAWedgedBatch(t *testing.T) {
+	var attempts atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		// A hostile Retry-After: honoured verbatim, three of these would hold
+		// the worker for 15 minutes.
+		w.Header().Set("Retry-After", "300")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	exporter := NewHTTPExporter(HTTPExporterConfig{
+		Endpoint:  server.URL,
+		APIKey:    "test-key",
+		QueueSize: 2,
+	})
+	exporter.retryBudget = 50 * time.Millisecond
+
+	start := time.Now()
+	if err := exporter.Export(context.Background(), &metrics.Batch{BatchSeq: 1, CollectedAt: time.Now()}); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	exporter.Close()
+	elapsed := time.Since(start)
+
+	// Without the budget this sleeps for the clamped Retry-After before its
+	// second attempt; with it, the batch is abandoned as soon as the next delay
+	// is known to outlive the budget.
+	if elapsed > 5*time.Second {
+		t.Errorf("took %s: the retry budget did not bound the wedged batch", elapsed)
+	}
+	if n := attempts.Load(); n != 1 {
+		t.Errorf("server saw %d attempts, want 1: the 300s Retry-After exceeds the budget so no retry should be waited out", n)
+	}
+	if s := exporter.Stats(); s.BatchesDropped != 1 {
+		t.Errorf("BatchesDropped = %d, want 1", s.BatchesDropped)
+	}
 }
 
 func TestHTTPExporter_Export_AfterClose(t *testing.T) {

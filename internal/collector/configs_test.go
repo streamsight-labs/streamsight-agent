@@ -134,7 +134,7 @@ func TestConfigPhasesSkipRatherThanReportNothing(t *testing.T) {
 		t.Errorf("off-cadence topic configs = %v / %s, want nil / skipped", cfgs, sec.status)
 	}
 
-	bcfgs, bsec := c.collectBrokerConfigs(t.Context(), metrics.ClusterMetrics{
+	bcfgs, bsec := c.collectBrokerConfigs(t.Context(), &metrics.ClusterMetrics{
 		Brokers: []metrics.Broker{{ID: 1}},
 	}, false)
 	if bcfgs != nil || bsec.status != metrics.SectionSkipped {
@@ -148,7 +148,7 @@ func TestConfigPhasesSkipRatherThanReportNothing(t *testing.T) {
 func TestBrokerConfigsSkipRatherThanAskAboutNoBroker(t *testing.T) {
 	c := &Collector{}
 
-	cfgs, sec := c.collectBrokerConfigs(t.Context(), metrics.ClusterMetrics{}, true)
+	cfgs, sec := c.collectBrokerConfigs(t.Context(), &metrics.ClusterMetrics{}, true)
 	if cfgs != nil {
 		t.Errorf("configs = %v, want nil", cfgs)
 	}

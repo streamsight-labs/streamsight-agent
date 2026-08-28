@@ -5,9 +5,23 @@ import "time"
 // SchemaVersion is the version of the Batch wire format. Bump on any
 // backwards-incompatible change to the JSON produced by this package.
 //
-// Everything added since v1 is an OPTIONAL field, so a v1 consumer that ignores
-// unknown keys stays correct. The one change that forces a bump is a new
-// SectionStatus value: see the closed-enum note on that type.
+// ADDING a field never forces a bump: everything added since v1 is OPTIONAL, so
+// a v1 consumer that ignores unknown keys stays correct.
+//
+// REMOVING one depends on what the consumer was already obliged to handle.
+// Dropping an `omitempty` or nullable field is safe, because its absence was
+// always a state a correct consumer had to tolerate -- that is why the
+// authorized_operations fields and the group_states section came out at v1.
+// Dropping a field that was ALWAYS PRESENT is not safe by that argument, and
+// two have gone: cluster.controller, and the guarantee that `cluster` itself is
+// present. Both were left at v1 deliberately, because no released consumer
+// existed to break; a bump would have forced every reader to accept a new
+// version number for a change none of them could observe. That reasoning
+// expires the moment a backend ships. After that, removing an always-present
+// field IS a bump.
+//
+// The one change that forces a bump regardless is a new SectionStatus value:
+// see the closed-enum note on that type.
 const SchemaVersion = 1
 
 // Batch is one collection cycle, and the unit of export: one POST for HTTP, one
@@ -35,7 +49,16 @@ type Batch struct {
 	CollectedAt  time.Time `json:"collected_at"`
 	CollectionMs int64     `json:"collection_ms"`
 
-	Cluster ClusterMetrics   `json:"cluster"`
+	// Cluster is NULL when the metadata request failed, and that is the whole
+	// point of it being a pointer. A zero ClusterMetrics serialises as
+	// broker_count 0 with a null broker list, and broker_count 0 is a legal
+	// value -- a claim that the cluster has no brokers, indistinguishable from
+	// an observation. Absent says the only true thing: this cycle could not
+	// describe the cluster. sections[cluster].status carries why, and
+	// Capabilities rides here too, so a failed cycle asserts nothing about a
+	// cluster it never reached. Carry the last non-null forward per cluster.id,
+	// exactly as ClusterCapabilities already documents.
+	Cluster *ClusterMetrics  `json:"cluster,omitempty"`
 	Topics  []TopicMetrics   `json:"topics"`
 	Groups  []GroupMetrics   `json:"groups"`
 	Offsets []ConsumerOffset `json:"offsets"`
@@ -345,7 +368,6 @@ func (h *LatencyHistogram) Observe(d time.Duration) {
 // ClusterMetrics is the cluster's identity and broker inventory.
 type ClusterMetrics struct {
 	ID          string   `json:"id"`
-	Controller  int32    `json:"controller"`
 	BrokerCount int      `json:"broker_count"`
 	Brokers     []Broker `json:"brokers"`
 

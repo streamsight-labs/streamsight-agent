@@ -50,9 +50,8 @@ func validBatch(seq uint64) *metrics.Batch {
 		CollectedAt:     base,
 		CollectionMs:    41,
 
-		Cluster: metrics.ClusterMetrics{
+		Cluster: &metrics.ClusterMetrics{
 			ID:          "MkU3OEVBNTcwNTJENDM2Qk",
-			Controller:  1,
 			BrokerCount: 1,
 			Brokers:     []metrics.Broker{{ID: 1, Host: "kafka", Port: 9092}},
 		},

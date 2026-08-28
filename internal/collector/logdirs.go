@@ -37,11 +37,13 @@ var errNotLogDirsResponse = errors.New("broker answered DescribeLogDirs with ano
 //
 // run is false on the cycles between samples; the section is still built and
 // returned, so "not collected" and "collected, empty" are never the same batch.
-func (c *Collector) collectLogDirs(ctx context.Context, cluster metrics.ClusterMetrics, tds kadm.TopicDetails, run bool) ([]metrics.LogDir, *section) {
+func (c *Collector) collectLogDirs(ctx context.Context, cluster *metrics.ClusterMetrics, tds kadm.TopicDetails, run bool) ([]metrics.LogDir, *section) {
 	sec := c.newSection(sectionLogDirs)
 	defer sec.stop()
 
-	if !run || tds == nil {
+	// A nil cluster means the metadata request failed, so the broker list this
+	// phase shards over is unknown; skipped, not an empty answer.
+	if !run || tds == nil || cluster == nil {
 		sec.downgrade(metrics.SectionSkipped)
 		return nil, sec
 	}
@@ -67,7 +69,7 @@ func (c *Collector) collectLogDirs(ctx context.Context, cluster metrics.ClusterM
 		return nil, sec
 	}
 
-	return buildLogDirs(described, cluster, sec), sec
+	return buildLogDirs(described, *cluster, sec), sec
 }
 
 // describeLogDirs issues this phase's one request, at the highest version the

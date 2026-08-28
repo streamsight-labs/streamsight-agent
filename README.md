@@ -214,8 +214,16 @@ parseable.
   terminal and counted as `batches_rejected` — a rejected batch is a configuration or
   schema problem, not a transient one.
 * The queue is bounded by `EXPORT_QUEUE_SIZE` and the enqueue never blocks: collection must
-  not stall behind a slow ingest, so an overflowing queue drops the batch and counts it in
-  `agent.batches_dropped`.
+  not stall behind a slow ingest. Batches are **encoded on the way in**, so the queue holds
+  gzipped bodies rather than live object graphs — roughly a tenth of the memory, and a retried
+  batch is marshalled once rather than once per attempt. An overflow evicts the **oldest**
+  queued batch and counts it in `agent.batches_dropped`: this is a monitoring agent, so when
+  the ingest cannot keep up the thing worth keeping is the freshest view of the cluster, not
+  the stalest. Either policy leaves a `batch_seq` gap; this one leaves it in the past.
+* One batch may occupy the single export worker for at most **one minute** in total, across
+  every attempt and every wait between them. Without that ceiling three retries each honouring
+  a clamped `Retry-After: 300` would hold the worker for fifteen minutes while the queue behind
+  it turned over completely and the agent shipped nothing.
 * On `SIGTERM` the agent stops accepting batches, drains the queue, and cancels an
   in-flight request after a grace period of `2 × EXPORT_TIMEOUT`. A batch that is
   mid-backoff when shutdown starts is abandoned and counted as dropped.
@@ -242,7 +250,7 @@ configuration problems at once and exits non-zero — one restart per fix, not f
 | `EXPORT_FILE_MAX_MB` | `100` | file mode | `0` uses the 100MB default; negative disables rotation. |
 | `EXPORT_FILE_MAX_BACKUPS` | `3` | file mode | `0` keeps none. Negative is an error. |
 | `EXPORT_FILE_FSYNC` | `false` | file mode | `fsync` after every batch. Off by default: a flush already survives the process dying, and only power loss needs a device round trip. Collection is synchronous, so on a network volume a stalled `fsync` stalls collection. |
-| `EXPORT_QUEUE_SIZE` | `100` | http mode | Must be > 0. Overflow drops the batch. |
+| `EXPORT_QUEUE_SIZE` | `20` | http mode | Must be > 0. Queue of encoded bodies; overflow evicts the oldest. |
 | `EXPORT_MAX_RETRIES` | `3` | http mode | Must be >= 0. `0` is honoured as "never retry", not treated as unset. |
 | `EXPORT_BASE_DELAY` | `1s` | http mode | Must be > 0. Backoff base. |
 | `EXPORT_TIMEOUT` | `10s` | http mode | Must be > 0. Per-request deadline. |
@@ -334,7 +342,11 @@ strictly *reduce* what is asked for; the rest only trim the payload.
 
 Per cycle, from the Admin API only:
 
-* **Cluster** — cluster ID, controller, broker list (id, host, port, rack).
+* **Cluster** — cluster ID and broker list (id, host, port, rack). Absent entirely when the
+  metadata request failed, rather than present with a zero broker count: `broker_count: 0` is
+  a legal value, so shipping it would be a claim rather than an admission. No controller id:
+  on KRaft the broker answers that with a *random* live broker, so it changes on roughly two
+  of every three healthy batches and carries no information.
 * **Topics** — partition count, replication factor, and per partition: leader, leader
   epoch, replicas, ISR, offline replicas, log start offset, last stable offset, high
   watermark.
@@ -396,7 +408,6 @@ than disabled — abridged (long partition and member lists cut):
   "collection_ms": 12,
   "cluster": {
     "id": "MkU3OEVBNTcwNTJENDM2Qg",
-    "controller": 1,
     "broker_count": 1,
     "brokers": [{"id": 1, "host": "kafka", "port": 9092}]
   },

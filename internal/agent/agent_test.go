@@ -162,7 +162,10 @@ func TestRunCycleStampsEnvelopeAndIncrementsBatchSeq(t *testing.T) {
 // which would look exactly like an agent whose hooks are not installed.
 func TestStampKeepsTheCollectorsRPCWindowAndAddsTheIdentity(t *testing.T) {
 	rpc := &metrics.RPCStats{WindowMs: 30_000, Brokers: []metrics.BrokerRPC{{BrokerID: 1}}}
-	coll := &fakeCollector{batch: &metrics.Batch{Agent: metrics.AgentStats{RPC: rpc}}}
+	coll := &fakeCollector{batch: &metrics.Batch{
+		Agent:   metrics.AgentStats{RPC: rpc},
+		Cluster: &metrics.ClusterMetrics{ID: "abc"},
+	}}
 	exp := &fakeExporter{}
 
 	a := newTestAgent(t, coll, exp)
@@ -186,8 +189,28 @@ func TestStampKeepsTheCollectorsRPCWindowAndAddsTheIdentity(t *testing.T) {
 	if b.Principal != "streamsight-agent" {
 		t.Errorf("principal = %q, want the SASL username", b.Principal)
 	}
-	if b.Cluster.Capabilities != a.caps {
-		t.Errorf("cluster.capabilities = %+v, want the startup fingerprint", b.Cluster.Capabilities)
+	if b.Cluster == nil || b.Cluster.Capabilities != a.caps {
+		t.Errorf("cluster.capabilities = %+v, want the startup fingerprint", b.Cluster)
+	}
+}
+
+// A failed metadata request leaves Cluster nil, and stamp must not attach a
+// capability fingerprint to a cluster this cycle could not describe — nor
+// panic reaching through the nil.
+func TestStampLeavesAFailedClusterAbsent(t *testing.T) {
+	coll := &fakeCollector{batch: &metrics.Batch{}}
+	exp := &fakeExporter{}
+
+	a := newTestAgent(t, coll, exp)
+	a.caps = &metrics.ClusterCapabilities{Features: map[string]bool{metrics.CapabilityLastStableOffset: true}}
+	a.runCycle(context.Background())
+
+	got := exp.seen()
+	if len(got) != 1 {
+		t.Fatalf("exported %d batches, want 1", len(got))
+	}
+	if got[0].Cluster != nil {
+		t.Errorf("cluster = %+v, want nil: the phase failed, so the batch claims nothing", got[0].Cluster)
 	}
 }
 

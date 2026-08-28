@@ -165,14 +165,25 @@ func TestBatchOmitsOptionalBlocksWhenNotCollected(t *testing.T) {
 	if _, ok := agent["rpc"]; ok {
 		t.Error("agent.rpc must be absent when the hooks are disabled")
 	}
-	cluster, ok := m["cluster"].(map[string]any)
-	if !ok {
-		t.Fatalf("cluster = %v, want an object", m["cluster"])
+	// Cluster is absent, not an empty object: a zero ClusterMetrics would ship
+	// broker_count 0, which is a legal value and so indistinguishable from a
+	// measurement. See Batch.Cluster.
+	if _, ok := m["cluster"]; ok {
+		t.Errorf("cluster present on a batch whose metadata request failed, want absent")
 	}
-	for _, key := range []string{"capabilities"} {
-		if _, ok := cluster[key]; ok {
-			t.Errorf("cluster.%s present when not probed, want absent", key)
-		}
+
+	// When the phase DID run, the object is there and capabilities stays absent
+	// until the probe fills it.
+	withCluster := marshalMap(t, Batch{SchemaVersion: SchemaVersion, Cluster: &ClusterMetrics{ID: "abc"}})
+	cluster, ok := withCluster["cluster"].(map[string]any)
+	if !ok {
+		t.Fatalf("cluster = %v, want an object", withCluster["cluster"])
+	}
+	if _, ok := cluster["capabilities"]; ok {
+		t.Error("cluster.capabilities present when not probed, want absent")
+	}
+	if _, ok := cluster["controller"]; ok {
+		t.Error("cluster.controller is not a field: on KRaft it is a random alive broker")
 	}
 }
 

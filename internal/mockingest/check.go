@@ -535,8 +535,11 @@ func countCheck(c *checker, b *metrics.Batch, code, path, noun string, count, go
 func checkData(c *checker, b *metrics.Batch) metrics.Truncation {
 	var implied metrics.Truncation
 
-	// Brokers have no cap, so this one stays an exact equality.
-	if b.Cluster.BrokerCount != len(b.Cluster.Brokers) {
+	// Brokers have no cap, so this one stays an exact equality -- when there is a
+	// cluster at all. It is absent on a cycle whose metadata request failed,
+	// which sections[cluster].status already reports; asserting a count against
+	// an observation that was never made would turn one failure into two.
+	if b.Cluster != nil && b.Cluster.BrokerCount != len(b.Cluster.Brokers) {
 		c.fail("data.broker_count", "$.cluster",
 			"broker_count=%d but %d brokers", b.Cluster.BrokerCount, len(b.Cluster.Brokers))
 	}

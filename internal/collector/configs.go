@@ -143,11 +143,14 @@ func (c *Collector) collectTopicConfigs(ctx context.Context, topics []metrics.To
 	return out, sec
 }
 
-func (c *Collector) collectBrokerConfigs(ctx context.Context, cluster metrics.ClusterMetrics, run bool) ([]metrics.BrokerConfig, *section) {
+func (c *Collector) collectBrokerConfigs(ctx context.Context, cluster *metrics.ClusterMetrics, run bool) ([]metrics.BrokerConfig, *section) {
 	sec := c.newSection(sectionBrokerConfigs)
 	defer sec.stop()
 
-	if !run {
+	// A nil cluster means the metadata request failed, so there is no broker
+	// list to name -- and naming none is the one thing this phase must never do
+	// (see the empty-ids guard below).
+	if !run || cluster == nil {
 		sec.downgrade(metrics.SectionSkipped)
 		return nil, sec
 	}

@@ -317,8 +317,12 @@ func (a *Agent) stamp(batch *metrics.Batch) {
 	// the certificate and the agent cannot know it.
 	batch.Principal = a.cfg.SASLUsername
 	// Constant for the client's lifetime; the collector leaves it alone because
-	// the probe is a startup fact, not a per-cycle sample.
-	batch.Cluster.Capabilities = a.caps
+	// the probe is a startup fact, not a per-cycle sample. Skipped when the
+	// cluster phase failed: Cluster is nil then, and a batch that could not
+	// describe the cluster must not describe its capabilities either.
+	if batch.Cluster != nil {
+		batch.Cluster.Capabilities = a.caps
+	}
 
 	// The collector owns the RPC window: it drains the hooks and emits the
 	// broker_rpc section from the same toggle, so the wholesale assignment below

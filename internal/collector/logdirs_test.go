@@ -58,7 +58,7 @@ func TestCollectLogDirsSkippedPathsIssueNoRequest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := logDirCollector(t, tt.opts)
-			dirs, sec := c.collectLogDirs(context.Background(), metrics.ClusterMetrics{}, tt.tds, tt.run)
+			dirs, sec := c.collectLogDirs(context.Background(), &metrics.ClusterMetrics{}, tt.tds, tt.run)
 			if dirs != nil {
 				t.Errorf("dirs = %+v, want none", dirs)
 			}

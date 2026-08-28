@@ -35,7 +35,7 @@ data:
 
   # HTTP mode. Uncomment these and set EXPORT_MODE=http.
   # EXPORT_ENDPOINT: "https://ingest.example.com/v1/batches"
-  # EXPORT_QUEUE_SIZE: "100"    # bounded queue; overflow drops rather than stalls
+  # EXPORT_QUEUE_SIZE: "20"     # queue of encoded bodies; overflow evicts the OLDEST
   # EXPORT_MAX_RETRIES: "3"     # retries per batch on 408/429/5xx
   # EXPORT_BASE_DELAY: "1s"     # full-jitter backoff base
   # EXPORT_TIMEOUT: "10s"       # per-request deadline
