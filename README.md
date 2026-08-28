@@ -660,10 +660,9 @@ exporter, so `batches_exported` is always at least one behind `batches_collected
   hint, and the standard Java consumer leaves it at `-1` with both the `range` and
   `cooperative-sticky` assignors. A detector keyed on generation deltas would sit at zero
   forever and read as a perfectly stable cluster. Use `group_epoch` (new-protocol groups) or
-  member-ID churn in `groups[].members[].member_id` — the latter is the measured one: a
-  `PreparingRebalance` dwell watcher on a faster ticker was built, run against a real
-  rebalance storm, found 2 of 31 rebalances where member-ID churn found all 31, and was
-  removed.
+  member-ID churn in `groups[].members[].member_id` — the latter is the measured one:
+  against a real rebalance storm it caught all 31 member-set changes, where sampling group
+  state caught 2, since a rebalance completes well inside a poll interval.
 * `log_dirs[].total_bytes` / `usable_bytes` are `null` below `DescribeLogDirs` v4
   (Kafka 3.3+), so on an older cluster a batch still carries growth with no headroom to
   compare it against.

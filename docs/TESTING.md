@@ -274,13 +274,12 @@ Partitions and committed-offset rows are the axes; broker count is not.
 
 ### Two things a chaos run has already taught, so you don't re-learn them
 
-- **A rebalance completes well inside a 5s poll.** A dedicated `PreparingRebalance` dwell
-  watcher on a fast ticker was built, measured against `chaos/rebalance-storm`, and found
-  **2 transitions out of 31 real member-set changes** — reading `Stable` on every sample,
-  because the poll landed on either side of each rebalance. It was deleted. This is a
-  sampling failure, not a tuning one: halving the interval does not fix it. Rebalance
-  detection is member-ID churn in `groups[].members[]`, which is in every batch at zero
-  request cost and caught all 31.
+- **Do not try to detect rebalances by sampling group state.** Measured against
+  `chaos/rebalance-storm`: 31 real member-set changes, and a state sample read `Stable`
+  almost every time — a rebalance completes well inside a 5s poll, so the sampler lands on
+  either side of it. That is a sampling failure, not a tuning one, and halving the interval
+  does not fix it. Detect rebalances from member-ID churn in `groups[].members[]`: it is in
+  every batch at zero request cost, and it caught all 31.
 - **`generation` is `-1` in practice.** It comes from the sticky-assignor hint, not the
   group's authoritative generation, and the standard Java consumer leaves it at `-1` with
   both `range` and `cooperative-sticky`. A detector keyed on generation deltas reads a
