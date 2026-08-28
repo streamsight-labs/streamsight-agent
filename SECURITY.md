@@ -142,5 +142,5 @@ Out of scope: vulnerabilities in Kafka itself, in your broker configuration, or
 in the network path; findings that require an attacker who already has the
 agent's credentials or a shell in its container; missing hardening that has no
 demonstrated impact; and DoS achieved by pointing the agent at a cluster with a
-pathological entity count (a known and documented limitation — see the
-cardinality notes in `docs/ARCHITECTURE.md`).
+pathological entity count (a known and documented limitation: every entity cap
+defaults to unlimited, and `truncation` reports whatever a configured cap drops).

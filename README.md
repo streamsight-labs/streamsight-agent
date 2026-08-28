@@ -278,7 +278,7 @@ configuration problems at once and exits non-zero — one restart per fix, not f
 | `COLLECT_MAX_TIMESTAMP` | `true` | Adds `partitions[].max_timestamp` — the newest record's timestamp and the offset carrying it — via `ListOffsets` at timestamp `-3` (KIP-734). **No new ACL**: same API key as the four offset phases, and the broker authorizes before it reads the timestamp field. It replaces an inference with a measurement: topic liveness is otherwise guessed from a run of zero end-offset deltas, which cannot tell a silent topic from a missed cycle. One extra `ListOffsets` fan-out; measured 4 ms on a 3-broker cluster. Needs Kafka 3.0+ (ListOffsets v7); below that the broker reads `-3` as a real millisecond and answers with an arbitrary offset **and no error**, which is why startup disables it rather than trusting the value. A partition with no max timestamp answers `-1` and ships `null`. |
 | `COLLECT_TIERED_OFFSETS` | `false` | Adds `partitions[].tiered.local_start_offset` via `ListOffsets` at `-4` (KIP-405): the earliest offset actually on the broker's **disk**, as opposed to `start_offset`, which on a tiered cluster is the global earliest including remote storage. A consumer reading between the two still succeeds and fetches from object storage at object-storage latency — a state nothing else in the batch distinguishes from healthy. Off by default because on a cluster without remote storage it returns the same answer as `start_offset` for the price of a round trip. Needs Kafka 3.4+ (ListOffsets v8). No new ACL. |
 | `COLLECT_LATEST_TIERED` | `true` | Additionally asks for `tiered.remote_end_offset` at `-5` (KIP-1005) — how far the archival tier is behind. **Ignored unless `COLLECT_TIERED_OFFSETS` is also set.** Gated apart from the local start because KIP-1005 landed five releases after KIP-405, so a 3.4–3.8 cluster serves one and not the other; one null inside a present `tiered` object is a real state, not an error. Needs Kafka 3.9+ (ListOffsets v9). No new ACL. |
-| `COLLECT_SHARE_GROUPS` | `false` | Adds the `share_groups[]` section via `ShareGroupDescribe` + `DescribeShareGroupOffsets` (KIP-932). Share groups are **not** consumer groups under another name: members share partitions and acknowledge individual records, so there is no committed offset per partition, no assignment to diff, and no lag in the committed-versus-end sense. They ship in their own section so no consumer-group derivation runs silently against a shape it does not model. Needs Kafka 4.0+. **Never exercised against a broker that can answer** — see `docs/ARCHITECTURE.md`. |
+| `COLLECT_SHARE_GROUPS` | `false` | Adds the `share_groups[]` section via `ShareGroupDescribe` + `DescribeShareGroupOffsets` (KIP-932). Share groups are **not** consumer groups under another name: members share partitions and acknowledge individual records, so there is no committed offset per partition, no assignment to diff, and no lag in the committed-versus-end sense. They ship in their own section so no consumer-group derivation runs silently against a shape it does not model. Needs Kafka 4.0+. **Never exercised against a broker that can answer.** |
 | `COLLECT_CONFIGS` | `true` | Adds `topic_configs[]` and `broker_configs[]` via `DescribeConfigs`, over a fixed allowlist (10 topic keys, 11 broker keys). **The only collector that needs an ACL outside the three DESCRIBE grants** — `DESCRIBE_CONFIGS` on `TOPIC` and on `CLUSTER` — and it defaults **on** anyway, because what it collects is a correction rather than a feature. Without the grant these two sections report `unauthorized` and nothing else degrades; set `COLLECT_CONFIGS=false` to stop asking. `cleanup.policy` marks the compacted topics, where offset deltas are not record counts and consumer lag is overstated by an unknowable amount — without it the product reports a confident wrong number. `min.insync.replicas` separates "redundancy is reduced" from "every `acks=all` produce is failing right now", which the URP gauge alone cannot do. `offsets.retention.minutes` turns consumer overrun from a post-mortem into a prediction. Measured cost: **+517 B gzipped on the cycles it runs**, 8 B/batch amortised at the default cadence. Needs Kafka 1.1+ (DescribeConfigs v1, the version that carries `ConfigSource`); startup disables it below that rather than shipping every key as an indistinguishable default. |
 | `MAX_TIMESTAMP_EVERY` | `12` | Run the max-timestamp phase every Nth cycle — once a minute at the default interval. Must be >= 1. Cadenced for two independent reasons. **Broker cost**: `-3` is the only offset sentinel that is not O(1). `-1` and `-2` read `logEndOffset`/`logStartOffset`, numbers already in memory; `-3` makes the broker walk every local log segment comparing cached `maxTimestampSoFar`, then on Kafka 3.8+ do an index lookup and scan the winning batch. **Payload**: `partitions[].max_timestamp` is the largest single field the agent adds — measured 77.7 B/partition raw and **18.9% of the gzipped batch**, and gzip cannot fold it because each value is a distinct wide integer. The question it answers — "when was the last record written" — has a minutes-scale answer, so a 60s-stale figure costs nothing real. |
 | `CONFIGS_EVERY` | `360` | Run the config phases every Nth cycle. The slowest cadence in the agent: configs change when a human changes them. Must be >= 1. |
@@ -389,8 +389,7 @@ Per cycle, from the Admin API only:
 
 Not obtainable this way, and therefore absent: broker CPU, broker-side request latency and
 per-topic byte rates. Those need JMX. (`agent.rpc` is latency and bytes as *this agent*
-saw them, which is a property of one client's connection to a broker, not of the broker.) See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for what
-is planned next and what it would cost, and
+saw them, which is a property of one client's connection to a broker, not of the broker.) See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the request budget per cycle.
 
 ## Output
@@ -488,7 +487,8 @@ That makes it dominate only where there is little data to dominate: on the one-b
 environment above it was the largest single block in the batch, taking a batch that measured
 2.0 KB uncompressed before the phase existed to 8.9 KB with it on. At real partition counts
 the ranking inverts — `log_dirs` and `topics` are both larger, because both are O(partitions)
-and this is not. `docs/ARCHITECTURE.md` Open item 1 carries the measured shares.
+and this is not: measured on a 3-broker cluster at 390 partitions, `broker_rpc` is 4% of
+the batch, while `topics` is about half of it.
 
 `schema_version` is bumped on any backwards-incompatible change to this shape. The
 `sections[].status` enum is closed in v1, which is why truncation is a separate boolean
@@ -663,7 +663,7 @@ exporter, so `batches_exported` is always at least one behind `batches_collected
   member-ID churn in `groups[].members[].member_id` — the latter is the measured one: a
   `PreparingRebalance` dwell watcher on a faster ticker was built, run against a real
   rebalance storm, found 2 of 31 rebalances where member-ID churn found all 31, and was
-  removed. See `docs/ARCHITECTURE.md` Open item 2.
+  removed.
 * `log_dirs[].total_bytes` / `usable_bytes` are `null` below `DescribeLogDirs` v4
   (Kafka 3.3+), so on an older cluster a batch still carries growth with no headroom to
   compare it against.
@@ -674,9 +674,9 @@ exporter, so `batches_exported` is always at least one behind `batches_collected
   silently carrying the high watermark. The failure mode only returns if the probe itself
   failed, which is logged loudly.
 * `broker_rpc` histograms are per broker per API key with no cap of their own. The share has
-  been measured on a 3-broker cluster — see `docs/ARCHITECTURE.md` Open item 1 — but
-  nothing bounds it structurally, and it grows with `brokers × API keys`, so on a large fleet
-  check batch bytes before leaving `COLLECT_RPC_STATS` on.
+  been measured on a 3-broker cluster at 4% of the batch, but nothing bounds it structurally,
+  and it grows with `brokers × API keys`, so on a large fleet check batch bytes before leaving
+  `COLLECT_RPC_STATS` on.
 
 ## Security
 
@@ -824,6 +824,10 @@ across separate releases if one agent is not enough.
 
 ## Local testing
 
+The full guide — unit tests, the SASL/ACL environment, the conformance mock, and driving the
+agent against a multi-broker cluster under load and induced failure — is
+[docs/TESTING.md](docs/TESTING.md). The short version follows.
+
 `docker compose up -d` at the repo root is the plain path: one broker, no auth, agent in
 file mode.
 
@@ -928,8 +932,3 @@ Contributing conventions, the lint setup and the review checklist are in
 [CONTRIBUTING.md](CONTRIBUTING.md). Security issues go through [SECURITY.md](SECURITY.md),
 not a public issue.
 
-## Roadmap
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the next collection targets, what
-each costs in requests and permissions, and what is not reachable through the Admin API at
-all.

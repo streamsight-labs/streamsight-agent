@@ -79,8 +79,8 @@ const (
 	// which is what DefaultLogDirsEvery is for rather than a reason to leave the
 	// data uncollected: at that cadence the section is absent from 96% of
 	// batches, and it costs ~4 KB gzipped on the cycles it RUNS, which is ~166 B
-	// per cycle amortised at LOG_DIRS_EVERY=24 (docs/ARCHITECTURE.md Open
-	// item 1 -- do not restate a number from it here without re-reading it).
+	// per cycle amortised at LOG_DIRS_EVERY=24, measured on a 3-broker cluster at
+	// 390 partitions RF 3.
 	// It needs no ACL beyond the DESCRIBE on CLUSTER the agent already requires.
 	//
 	// Two things to know before sizing a large cluster. The figures describe the
@@ -91,11 +91,9 @@ const (
 	DefaultCollectLogDirs = true
 	// DefaultLogDirsEvery samples once every two minutes at the 5s interval.
 	//
-	// MEASURED at 1,170 replicas (390 partitions RF 3) -- docs/ARCHITECTURE.md
-	// Open item 1, which is where these figures are maintained and must be
-	// re-read rather than re-derived here: the section is 77.0 B per replica, so
-	// it is ~90 KB against a ~174 KB steady batch -- it adds ~52% to the payload
-	// on the cycles it runs. Disks fill over hours, so 720 samples a day is ample
+	// MEASURED at 1,170 replicas (390 partitions RF 3): the section is 77.0 B per
+	// replica, so it is ~90 KB against a ~174 KB steady batch -- it adds ~52% to
+	// the payload on the cycles it runs. Disks fill over hours, so 720 samples a day is ample
 	// for a days-to-full forecast, and it keeps the largest section off 96% of
 	// batches. Offline-disk detection does not depend on this cadence: a dead
 	// replica also shows in partitions[].offline_replicas every cycle.
@@ -156,7 +154,7 @@ const (
 	// index lookup and scan the winning batch -- work that can reach page cache.
 	// At 390 partitions, every cycle is 6.7M segment walks a day; this is 560k.
 	//
-	// MEASURED, docs/ARCHITECTURE.md Open item 1: partitions[].max_timestamp
+	// MEASURED at 390 partitions: partitions[].max_timestamp
 	// is 77.7 B per partition raw and 18.91% of the gzipped steady batch, the
 	// largest single field the agent adds and one gzip cannot fold -- each value
 	// is a distinct wide integer.

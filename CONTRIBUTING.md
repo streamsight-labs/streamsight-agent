@@ -74,7 +74,7 @@ against their production Kafka.
 **A change that requires a fourth ACL is a product decision. Open an issue
 first.** It will not be merged as part of a feature PR, however good the
 feature is. Two candidate collectors are already parked on exactly this
-question (`docs/ARCHITECTURE.md`).
+question.
 
 If you are unsure whether a new Admin API call stays inside the three grants,
 `test/` brings up a local KRaft cluster with SASL/SCRAM and `StandardAuthorizer`

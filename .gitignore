@@ -46,8 +46,5 @@ __debug_bin*
 # Agent batch output (reproducible: `make run`, or a khaos scenario)
 *.jsonl
 
-# Personal playground — see scratch/
-scratch/
-
-# Personal reading notes, not shipped
+# Local playground, not shipped
 scratch/
