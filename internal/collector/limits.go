@@ -28,7 +28,6 @@ type Limits struct {
 	MaxTopics             int
 	MaxPartitionsPerTopic int
 	MaxGroups             int
-	MaxMembersPerGroup    int
 	MaxOffsetsPerGroup    int
 }
 
@@ -39,7 +38,7 @@ type Limits struct {
 // echoed by wire() whenever the block is emitted.
 func (l Limits) any() bool {
 	return l.MaxTopics != 0 || l.MaxPartitionsPerTopic != 0 || l.MaxGroups != 0 ||
-		l.MaxMembersPerGroup != 0 || l.MaxOffsetsPerGroup != 0
+		l.MaxOffsetsPerGroup != 0
 }
 
 func (l Limits) wire() *metrics.Limits {
@@ -49,7 +48,6 @@ func (l Limits) wire() *metrics.Limits {
 		MaxTopics:             l.MaxTopics,
 		MaxPartitionsPerTopic: l.MaxPartitionsPerTopic,
 		MaxGroups:             l.MaxGroups,
-		MaxMembersPerGroup:    l.MaxMembersPerGroup,
 		MaxOffsetsPerGroup:    l.MaxOffsetsPerGroup,
 	}
 }

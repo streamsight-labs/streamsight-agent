@@ -131,17 +131,16 @@ func (c *Collector) collectGroups(ctx context.Context, ids []string, types map[s
 			sec.recordGroup("DescribeGroups", g.Group, g.Err)
 		}
 
+		// Every member, uncapped: the list is bounded by the consumers the
+		// customer actually runs, and DescribeGroups returns all of them
+		// whatever we do, so a cap would have deleted rows the cluster had
+		// already paid to produce.
+		//
 		// kadm sorts DescribedGroup.Members by InstanceID (nil last) then
-		// MemberID (kadm@v1.18.0 groups.go:401), so the retained prefix is
-		// stable across cycles without sorting here.
-		keep, droppedMembers := capLen(len(g.Members), c.limits.MaxMembersPerGroup)
-		if droppedMembers > 0 {
-			sec.dropped.Members += droppedMembers
-			sec.truncated = true
-		}
-
-		members := make([]metrics.GroupMember, 0, keep)
-		for _, m := range g.Members[:keep] {
+		// MemberID (kadm@v1.18.0 groups.go:401), so the order is stable across
+		// cycles without sorting here.
+		members := make([]metrics.GroupMember, 0, len(g.Members))
+		for _, m := range g.Members {
 			member := metrics.GroupMember{
 				MemberID:   m.MemberID,
 				InstanceID: m.InstanceID,
@@ -182,10 +181,9 @@ func (c *Collector) collectGroups(ctx context.Context, ids []string, types map[s
 			members = append(members, member)
 		}
 
-		// The PRE-truncation count, so len(members) < member_count says the
-		// member list was cut. Generation is derived from the emitted members, so
-		// a truncated group under-reports it — one more reason
-		// MaxMembersPerGroup defaults to unlimited.
+		// Equal to len(members) now that nothing caps the list, and kept as its
+		// own field because the wire contract is "the count is taken before any
+		// cap": a consumer must be able to read it without knowing that.
 		gm.MemberCount = len(g.Members)
 		gm.Members = members
 		groups = append(groups, gm)
@@ -252,8 +250,9 @@ func applyConsumerGroup(gm *metrics.GroupMetrics, d kadm.DescribedConsumerGroup)
 	for _, m := range d.Members {
 		byID[m.MemberID] = m
 	}
-	// Iterate the members already emitted, so MaxMembersPerGroup still bounds the
-	// list and the two describes cannot disagree about which members exist.
+	// Iterate the members already emitted rather than the overlay's own list, so
+	// the two describes cannot disagree about which members exist -- the classic
+	// describe is the one that decides.
 	for j := range gm.Members {
 		m, ok := byID[gm.Members[j].MemberID]
 		if !ok {

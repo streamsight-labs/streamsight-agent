@@ -55,8 +55,8 @@ func TestTruncationPresenceMarksIncompleteBatch(t *testing.T) {
 
 func TestTruncationAdd(t *testing.T) {
 	total := Truncation{Topics: 1}
-	total.Add(Truncation{Topics: 2, Partitions: 3, Groups: 4, Members: 5, Offsets: 6, ErrorsCollapsed: 7, ErrorsDropped: 8})
-	want := Truncation{Topics: 3, Partitions: 3, Groups: 4, Members: 5, Offsets: 6, ErrorsCollapsed: 7, ErrorsDropped: 8}
+	total.Add(Truncation{Topics: 2, Partitions: 3, Groups: 4, Offsets: 6, ErrorsCollapsed: 7, ErrorsDropped: 8})
+	want := Truncation{Topics: 3, Partitions: 3, Groups: 4, Offsets: 6, ErrorsCollapsed: 7, ErrorsDropped: 8}
 	if total != want {
 		t.Errorf("Add() = %+v, want %+v", total, want)
 	}

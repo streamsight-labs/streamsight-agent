@@ -128,7 +128,6 @@ limits *metrics.Limits nullable omitempty
 limits.max_error_samples int omitempty
 limits.max_errors int omitempty
 limits.max_groups int omitempty
-limits.max_members_per_group int omitempty
 limits.max_offsets_per_group int omitempty
 limits.max_partitions_per_topic int omitempty
 limits.max_topics int omitempty
@@ -243,7 +242,6 @@ truncation *metrics.Truncation nullable omitempty
 truncation.errors_collapsed int omitempty
 truncation.errors_dropped int omitempty
 truncation.groups int omitempty
-truncation.members int omitempty
 truncation.offsets int omitempty
 truncation.partitions int omitempty
 truncation.topics int omitempty

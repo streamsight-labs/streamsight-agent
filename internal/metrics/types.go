@@ -125,7 +125,6 @@ type Truncation struct {
 	Topics     int `json:"topics,omitempty"`
 	Partitions int `json:"partitions,omitempty"`
 	Groups     int `json:"groups,omitempty"`
-	Members    int `json:"members,omitempty"`
 	Offsets    int `json:"offsets,omitempty"`
 	// ErrorsCollapsed is occurrences folded into an existing entry's Count by
 	// deduplication. Nothing is lost: the total survives in Count.
@@ -139,7 +138,6 @@ func (t *Truncation) Add(o Truncation) {
 	t.Topics += o.Topics
 	t.Partitions += o.Partitions
 	t.Groups += o.Groups
-	t.Members += o.Members
 	t.Offsets += o.Offsets
 	t.ErrorsCollapsed += o.ErrorsCollapsed
 	t.ErrorsDropped += o.ErrorsDropped
@@ -153,7 +151,6 @@ type Limits struct {
 	MaxTopics             int `json:"max_topics,omitempty"`
 	MaxPartitionsPerTopic int `json:"max_partitions_per_topic,omitempty"`
 	MaxGroups             int `json:"max_groups,omitempty"`
-	MaxMembersPerGroup    int `json:"max_members_per_group,omitempty"`
 	MaxOffsetsPerGroup    int `json:"max_offsets_per_group,omitempty"`
 }
 

@@ -230,7 +230,6 @@ func collectorOptions(cfg *config.Config, logger *slog.Logger) collector.Options
 			MaxTopics:             cfg.MaxTopics,
 			MaxPartitionsPerTopic: cfg.MaxPartitionsPerTopic,
 			MaxGroups:             cfg.MaxGroups,
-			MaxMembersPerGroup:    cfg.MaxMembersPerGroup,
 			MaxOffsetsPerGroup:    cfg.MaxOffsetsPerGroup,
 		},
 		Logger: logger,

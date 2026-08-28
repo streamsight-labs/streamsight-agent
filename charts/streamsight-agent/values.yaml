@@ -272,8 +272,6 @@ limits:
   # the DescribeGroups and OffsetFetch fan-out AND truncates the offsets
   # section, not just groups.
   maxGroups: 0
-  # MAX_MEMBERS_PER_GROUP
-  maxMembersPerGroup: 0
   # MAX_OFFSETS_PER_GROUP
   maxOffsetsPerGroup: 0
 

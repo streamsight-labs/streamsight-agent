@@ -358,7 +358,6 @@ func TestCollectorOptionsCarryEveryConfiguredSetting(t *testing.T) {
 		MaxTopics:             3,
 		MaxPartitionsPerTopic: 4,
 		MaxGroups:             5,
-		MaxMembersPerGroup:    6,
 		MaxOffsetsPerGroup:    8,
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

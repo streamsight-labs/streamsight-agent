@@ -285,7 +285,6 @@ type Config struct {
 	MaxTopics             int
 	MaxPartitionsPerTopic int
 	MaxGroups             int
-	MaxMembersPerGroup    int
 	MaxOffsetsPerGroup    int
 
 	LogLevel        string
@@ -456,7 +455,6 @@ func Load() (*Config, error) {
 		{"MAX_TOPICS", &c.MaxTopics},
 		{"MAX_PARTITIONS_PER_TOPIC", &c.MaxPartitionsPerTopic},
 		{"MAX_GROUPS", &c.MaxGroups},
-		{"MAX_MEMBERS_PER_GROUP", &c.MaxMembersPerGroup},
 		{"MAX_OFFSETS_PER_GROUP", &c.MaxOffsetsPerGroup},
 	} {
 		*lim.dst = p.integer(lim.key, DefaultMaxEntities)
@@ -515,7 +513,6 @@ func (c *Config) Warnings() []string {
 		{"MAX_TOPICS", c.MaxTopics},
 		{"MAX_PARTITIONS_PER_TOPIC", c.MaxPartitionsPerTopic},
 		{"MAX_GROUPS", c.MaxGroups},
-		{"MAX_MEMBERS_PER_GROUP", c.MaxMembersPerGroup},
 		{"MAX_OFFSETS_PER_GROUP", c.MaxOffsetsPerGroup},
 	} {
 		if lim.val != 0 {
@@ -639,7 +636,6 @@ func (c *Config) Redacted() string {
 		{"max_topics", c.MaxTopics},
 		{"max_partitions_per_topic", c.MaxPartitionsPerTopic},
 		{"max_groups", c.MaxGroups},
-		{"max_members_per_group", c.MaxMembersPerGroup},
 		{"max_offsets_per_group", c.MaxOffsetsPerGroup},
 	} {
 		if lim.val != 0 {

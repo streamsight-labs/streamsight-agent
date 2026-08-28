@@ -654,7 +654,9 @@ func checkData(c *checker, b *metrics.Batch) metrics.Truncation {
 				"groups are not sorted by id (%q after %q)", g.ID, prevGroup)
 		}
 		prevGroup = g.ID
-		implied.Members += countCheck(c, b, "data.member_count", path,
+		// Nothing caps the member list, so this can only ever be a sender bug;
+		// there is no truncation counter left for it to imply.
+		countCheck(c, b, "data.member_count", path,
 			"member_count", g.MemberCount, len(g.Members))
 		if g.Generation != -1 {
 			allMinusOne = false
@@ -808,7 +810,7 @@ func checkTruncation(c *checker, b *metrics.Batch, implied metrics.Truncation) {
 				"the batch is incomplete, so an empty one makes a complete batch look short")
 	}
 
-	entities := t.Topics + t.Partitions + t.Groups + t.Members + t.Offsets
+	entities := t.Topics + t.Partitions + t.Groups + t.Offsets
 	if entities > 0 && b.Limits == nil {
 		c.fail("truncation.no_limits", "$.limits",
 			"%d entities were truncated but no limits block says which cap did it", entities)
@@ -821,11 +823,6 @@ func checkTruncation(c *checker, b *metrics.Batch, implied metrics.Truncation) {
 		c.fail("truncation.partitions", "$.truncation",
 			"declares %d dropped partitions but the per-topic counts imply at least %d",
 			t.Partitions, implied.Partitions)
-	}
-	if t.Members < implied.Members {
-		c.fail("truncation.members", "$.truncation",
-			"declares %d dropped members but the per-group counts imply at least %d",
-			t.Members, implied.Members)
 	}
 	if t.Offsets < implied.Offsets {
 		c.fail("truncation.offsets", "$.truncation",

@@ -110,9 +110,6 @@ data:
   {{- if .Values.limits.maxGroups }}
   MAX_GROUPS: {{ .Values.limits.maxGroups | int | quote }}
   {{- end }}
-  {{- if .Values.limits.maxMembersPerGroup }}
-  MAX_MEMBERS_PER_GROUP: {{ .Values.limits.maxMembersPerGroup | int | quote }}
-  {{- end }}
   {{- if .Values.limits.maxOffsetsPerGroup }}
   MAX_OFFSETS_PER_GROUP: {{ .Values.limits.maxOffsetsPerGroup | int | quote }}
   {{- end }}

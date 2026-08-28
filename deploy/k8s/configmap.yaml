@@ -116,7 +116,6 @@ data:
   # MAX_TOPICS: "0"               # also shrinks the offset and log-dir requests
   # MAX_PARTITIONS_PER_TOPIC: "0" # payload cap; also shrinks the log-dir request
   # MAX_GROUPS: "0"               # ALSO truncates the offsets section, not just groups
-  # MAX_MEMBERS_PER_GROUP: "0"
   # MAX_OFFSETS_PER_GROUP: "0"
 
   # -- Agent --------------------------------------------------------------

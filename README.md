@@ -323,11 +323,13 @@ ceiling. Setting any of them logs a startup warning.
 | `MAX_TOPICS` | `0` (unlimited) | Maximum topics per batch. Also shrinks the request fan-out: it caps the topic list sent to `ListStartOffsets`/`ListCommittedOffsets`/`ListEndOffsets` and the topic+partition set sent to `DescribeLogDirs`. |
 | `MAX_PARTITIONS_PER_TOPIC` | `0` (unlimited) | Maximum partitions emitted per topic. Payload cap only for the offset listings — kadm's `List*Offsets` take topic names, so the broker computes every partition regardless — but it does shrink the `DescribeLogDirs` request, whose partitions are named on the wire. |
 | `MAX_GROUPS` | `0` (unlimited) | Maximum consumer groups per batch. Enforced once, on the shared `ListGroups` result, so it shrinks the `DescribeGroups` and `OffsetFetch` fan-out **and truncates the `offsets` section as well as `groups`**. |
-| `MAX_MEMBERS_PER_GROUP` | `0` (unlimited) | Maximum members emitted per group. `groups[].generation` is derived from the members that were emitted, so a truncated group can under-report it. |
 | `MAX_OFFSETS_PER_GROUP` | `0` (unlimited) | Maximum committed offsets emitted per group. |
 
 No cap adds an ACL requirement, and none adds a request. `MAX_TOPICS` and `MAX_GROUPS`
-strictly *reduce* what is asked for; the rest only trim the payload.
+strictly *reduce* what is asked for, `MAX_PARTITIONS_PER_TOPIC` does so for the log-dirs
+request alone, and `MAX_OFFSETS_PER_GROUP` only trims the payload. There is no cap on
+members: the list is bounded by the consumers you actually run, and `DescribeGroups`
+returns every one of them whatever the agent does with the answer.
 
 ### Kafka authentication
 
@@ -595,7 +597,7 @@ entries in `errors[]` bear that section's name — also not an occurrence count.
 **6. The presence of `truncation` means the batch is incomplete.**
 Its absence means complete. It is readable at three levels:
 
-* **batch** — `truncation.{topics,partitions,groups,members,offsets,errors_collapsed,errors_dropped}`:
+* **batch** — `truncation.{topics,partitions,groups,offsets,errors_collapsed,errors_dropped}`:
   can a cluster-wide aggregate be computed from this batch at all?
 * **section** — `sections[].truncated`, `sections[].errors_collapsed`,
   `sections[].errors_dropped`: which phase is short?
