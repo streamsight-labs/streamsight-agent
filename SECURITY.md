@@ -44,13 +44,13 @@ product decision, not an implementation detail.
 
 | Resource | Operation | Used for |
 |---|---|---|
-| `CLUSTER` | `DESCRIBE` | `Metadata` (brokers, controller, cluster ID), `ListGroups`, `ApiVersions`, and `DescribeLogDirs` when `COLLECT_LOG_DIRS` is enabled |
-| `TOPIC` | `DESCRIBE` | Topic and partition metadata, `ListOffsets` (log start, high watermark, and the `read_committed` listing that yields the last stable offset), and the topics inside `OffsetFetch` |
-| `GROUP` | `DESCRIBE` | `DescribeGroups` and `OffsetFetch` |
+| `CLUSTER` | `DESCRIBE` | `Metadata` (brokers, controller, cluster ID), `ListGroups`, `ApiVersions`, `DescribeLogDirs` (`COLLECT_LOG_DIRS`, default on), and `ListPartitionReassignments` (issued only on an observed under-replicated partition) |
+| `TOPIC` | `DESCRIBE` | Topic and partition metadata; every `ListOffsets` flavour — log start, high watermark, the `read_committed` listing that yields the last stable offset, the by-timestamp throughput window, max timestamp, and the tiered-storage sentinels, all one API key the broker authorizes before reading the isolation level or the timestamp; `OffsetForLeaderEpoch`; and the topics inside `OffsetFetch` |
+| `GROUP` | `DESCRIBE` | `DescribeGroups`, `ConsumerGroupDescribe` (KIP-848 groups), `OffsetFetch`, and — when `COLLECT_SHARE_GROUPS` is enabled — `ShareGroupDescribe` and `DescribeShareGroupOffsets` |
 | `TOPIC` | `DESCRIBE_CONFIGS` | `DescribeConfigs` for topic configuration (`COLLECT_CONFIGS`, default on) |
 | `CLUSTER` | `DESCRIBE_CONFIGS` | `DescribeConfigs` for broker configuration |
 
-Every call the agent makes falls inside those three grants. `ListOffsets` carries an
+Every call the agent makes falls inside those five grants. `ListOffsets` carries an
 isolation level that the broker applies only *after* authorization, so reading the last
 stable offset needs no grant beyond the one already required for the high watermark.
 `DescribeLogDirs` returns directory paths and per-replica byte sizes — never record
@@ -92,11 +92,17 @@ Nothing else. In particular:
 - **It is not an admin tool.** No `CLUSTER_ACTION`, no `IDEMPOTENT_WRITE`, no
   broker or controller mutation of any kind.
 
-You can verify this rather than take our word for it: grant the three ACLs
-above and nothing else, run the agent, and confirm every section reports `ok`.
-`README.md` has the `kafka-acls`, MSK, Confluent Cloud, and Redpanda forms of
-those grants, and `test/` brings up a local KRaft cluster with SASL/SCRAM and
-`StandardAuthorizer` that enforces exactly this set.
+You can verify this rather than take our word for it: grant the five ACLs
+above and nothing else, run the agent, and confirm every section reports `ok`
+or `skipped`. `README.md` has the `kafka-acls`, MSK, Confluent Cloud, and
+Redpanda forms of those grants, and `test/` brings up a local KRaft cluster
+with SASL/SCRAM and `StandardAuthorizer` enforcing them.
+
+One deliberate difference in that environment: `test/setup-acls.sh` grants only
+the three `DESCRIBE` operations, so `topic_configs` and `broker_configs` report
+`unauthorized` there. That is the standing test that the two config sections
+degrade cleanly and that nothing else degrades with them — not a defect, and
+not the configuration a deployment should run.
 
 **Data leaving your network.** In `file` and `stdout` export modes the agent
 opens no outbound connection except to your brokers. In `http` mode it POSTs
@@ -133,7 +139,7 @@ reach it on. The published image runs as numeric UID `1000`, and the chart sets
 ## Scope
 
 In scope: anything that lets the agent read, write, or damage cluster state
-beyond the three DESCRIBE grants; credential leakage through logs, exported
+beyond the five read-only grants; credential leakage through logs, exported
 batches, or the container image; remote code execution or memory corruption
 reachable from broker responses or ingest responses; a crafted ingest response
 that causes the agent to misbehave against your brokers.

@@ -555,8 +555,8 @@ without cross-checking the section. The same holds for `topics[]`, `partitions[]
 `groups[]` and `log_dirs[]`.
 
 Every failure is also attributed in `errors[]`, which is omitted when empty. Deleting the
-group ACL from the local test cluster produces exactly this (the other five sections stay
-`ok`):
+group ACL from the local test cluster produces exactly this (every other section is
+unaffected):
 
 ```json
 "sections": [
@@ -682,7 +682,7 @@ exporter, so `batches_exported` is always at least one behind `batches_collected
 
 Without authentication any client can do anything to the cluster. The agent is read-only in
 code, but only the broker can enforce that. Enable SASL (who are you) and ACLs (what may
-you do), then grant the agent these three permissions and nothing else.
+you do), then grant the agent these five permissions and nothing else.
 
 | Resource | Operation | Used by |
 |----------|-----------|---------|
@@ -741,7 +741,7 @@ BS="--bootstrap-server localhost:9092"
 kafka-configs.sh $BS --alter --add-config 'SCRAM-SHA-512=[password=<agent-password>]' \
   --entity-type users --entity-name streamsight-agent
 
-# 2. The three read-only ACLs
+# 2. The three DESCRIBE ACLs
 ACL="kafka-acls.sh $BS --add --allow-principal User:streamsight-agent --operation DESCRIBE"
 $ACL --cluster
 $ACL --topic '*' --resource-pattern-type literal
@@ -770,7 +770,8 @@ All of them need the same five read-only grants; only the tooling differs.
 
 **Confluent Cloud** — create a service account and API key, then grant
 `--operations DESCRIBE` with `--cluster-scope`, `--topic '*'` and `--consumer-group '*'`
-via `confluent kafka acl create`. Use the API key as `KAFKA_SASL_USERNAME` /
+via `confluent kafka acl create`, and `--operations DESCRIBE_CONFIGS` with `--cluster-scope`
+and `--topic '*'` for the two config grants. Use the API key as `KAFKA_SASL_USERNAME` /
 `KAFKA_SASL_PASSWORD` with `KAFKA_SASL_MECHANISM=PLAIN` and `KAFKA_TLS_ENABLED=true`.
 
 **AWS MSK** — SASL/SCRAM only; MSK IAM auth is a different mechanism and is not supported.
@@ -784,11 +785,11 @@ so that path does not apply here.)
 aws secretsmanager create-secret --name AmazonMSK_streamsight-agent \
   --secret-string '{"username":"streamsight-agent","password":"<agent-password>"}'
 aws kafka batch-associate-scram-secret --cluster-arn <arn> --secret-arn-list <secret-arn>
-# then apply the three ACLs above with kafka-acls.sh from a client with access
+# then apply the five ACLs above with kafka-acls.sh from a client with access
 ```
 
 **Aiven** — `aiven service user-create <service> --username streamsight-agent`, then add
-the DESCRIBE grants under Service → ACLs.
+the five read-only grants under Service → ACLs.
 
 **Azure Event Hubs** — a SAS policy with Listen only; `KAFKA_SASL_MECHANISM=PLAIN`,
 `KAFKA_SASL_USERNAME='$ConnectionString'`, the connection string as
@@ -801,6 +802,8 @@ rpk security user create streamsight-agent -p <agent-password>
 rpk security acl create --allow-principal User:streamsight-agent --operation describe --cluster
 rpk security acl create --allow-principal User:streamsight-agent --operation describe --topic '*'
 rpk security acl create --allow-principal User:streamsight-agent --operation describe --group '*'
+rpk security acl create --allow-principal User:streamsight-agent --operation describe_configs --cluster
+rpk security acl create --allow-principal User:streamsight-agent --operation describe_configs --topic '*'
 ```
 
 ## Deployment
@@ -835,7 +838,7 @@ To exercise the real security posture — SASL/SCRAM plus ACLs, with
 `allow.everyone.if.no.acl.found=false` — use the environment under `test/`:
 
 ```bash
-make test-local-up      # broker, SCRAM credential, the three ACLs, seed data, agent
+make test-local-up      # broker, SCRAM credential, the three DESCRIBE ACLs, seed data, agent
 make test-local-logs    # agent stderr plus one JSON batch per line (stdout mode)
 make test-local-down    # stop and delete volumes
 ```
