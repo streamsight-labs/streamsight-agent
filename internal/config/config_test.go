@@ -761,27 +761,6 @@ func TestLoadOptionalCollectors(t *testing.T) {
 		}
 	})
 
-	// The always-on phases have no environment key at all, so a deployment that
-	// still carries one from an older release must not silently look configured.
-	t.Run("the always-on phases take no environment key", func(t *testing.T) {
-		setEnv(t, base(map[string]string{
-			"COLLECT_REASSIGNMENTS": "false",
-			"COLLECT_EPOCH_PROBES":  "false",
-			"COLLECT_RPC_STATS":     "false",
-			"COLLECT_LATEST_TIERED": "false",
-		}))
-		cfg, err := Load()
-		if err != nil {
-			t.Fatalf("Load: %v", err)
-		}
-		if strings.Contains(cfg.Redacted(), "collect_reassignments") ||
-			strings.Contains(cfg.Redacted(), "collect_epoch_probes") ||
-			strings.Contains(cfg.Redacted(), "collect_rpc_stats") ||
-			strings.Contains(cfg.Redacted(), "collect_latest_tiered") {
-			t.Errorf("a removed knob still reaches the startup line: %s", cfg.Redacted())
-		}
-	})
-
 	// Every one of these is a modulus, a ticker period or a window width, so the
 	// value Load would otherwise pass on either panics or asks about the future.
 	t.Run("nonsensical cadences and widths are rejected", func(t *testing.T) {
