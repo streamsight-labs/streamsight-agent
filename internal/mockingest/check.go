@@ -140,7 +140,8 @@ func (s *Server) validate(r *http.Request) *result {
 
 	checkEnvelope(c, res)
 	checkSections(c, res.batch)
-	checkTruncation(c, res.batch, checkData(c, res.batch))
+	checkData(c, res.batch)
+	checkTruncation(c, res.batch)
 	checkAgent(c, res.batch)
 	s.checkState(c, res)
 
@@ -511,30 +512,21 @@ func sectionByName(b *metrics.Batch, name string) (metrics.Section, bool) {
 	return metrics.Section{}, false
 }
 
-// countCheck compares a pre-cap count against the list that actually shipped.
+// countCheck compares a declared count against the list that actually shipped.
 // PartitionCount, MemberCount and OffsetCount are the counts BEFORE any cap, so
 // `count > len(list)` is how truncation describes itself — but only if the batch
 // admits to it: a shortfall with no truncation block is a silent lie about the
 // customer's cluster. A count BELOW the list length is impossible either way.
-func countCheck(c *checker, b *metrics.Batch, code, path, noun string, count, got int) (short int) {
-	switch {
-	case count < got:
-		c.fail(code, path, "%s=%d but %d shipped; the count is taken before any cap and can never be lower",
-			noun, count, got)
-	case count > got && b.Truncation == nil:
-		c.fail(code, path, "%s=%d but only %d shipped, and the batch declares no truncation",
-			noun, count, got)
-	case count > got:
-		short = count - got
+func countCheck(c *checker, b *metrics.Batch, code, path, noun string, count, got int) {
+	if count != got {
+		c.fail(code, path, "%s=%d but %d shipped; no cap can shorten an entity list, "+
+			"so the two must agree exactly", noun, count, got)
 	}
-	return short
 }
 
-// checkData returns the truncation the batch's own per-entity counts imply, for
-// checkTruncation to reconcile against the declared block.
-func checkData(c *checker, b *metrics.Batch) metrics.Truncation {
-	var implied metrics.Truncation
-
+// checkData walks the batch's own entities: counts against lists, sort order,
+// duplicates, and the cross-section arithmetic nothing else can see.
+func checkData(c *checker, b *metrics.Batch) {
 	// Brokers have no cap, so this one stays an exact equality -- when there is a
 	// cluster at all. It is absent on a cycle whose metadata request failed,
 	// which sections[cluster].status already reports; asserting a count against
@@ -561,7 +553,7 @@ func checkData(c *checker, b *metrics.Batch) metrics.Truncation {
 		}
 		prevTopic = t.Name
 
-		implied.Partitions += countCheck(c, b, "data.partition_count", path,
+		countCheck(c, b, "data.partition_count", path,
 			"partition_count", t.PartitionCount, len(t.Partitions))
 
 		seenPart := map[int32]bool{}
@@ -654,7 +646,7 @@ func checkData(c *checker, b *metrics.Batch) metrics.Truncation {
 				"groups are not sorted by id (%q after %q)", g.ID, prevGroup)
 		}
 		prevGroup = g.ID
-		implied.Members += countCheck(c, b, "data.member_count", path,
+		countCheck(c, b, "data.member_count", path,
 			"member_count", g.MemberCount, len(g.Members))
 		if g.Generation != -1 {
 			allMinusOne = false
@@ -677,7 +669,7 @@ func checkData(c *checker, b *metrics.Batch) metrics.Truncation {
 				"offsets are not sorted by group_id (%q after %q)", co.GroupID, prevGID)
 		}
 		prevGID = co.GroupID
-		implied.Offsets += countCheck(c, b, "data.offset_count", path,
+		countCheck(c, b, "data.offset_count", path,
 			"offset_count", co.OffsetCount, len(co.Offsets))
 
 		for j, po := range co.Offsets {
@@ -720,7 +712,6 @@ func checkData(c *checker, b *metrics.Batch) metrics.Truncation {
 	}
 
 	checkLogDirs(c, b)
-	return implied
 }
 
 // checkLogDirs validates the per-broker storage view. Its rows are per REPLICA,
@@ -772,11 +763,12 @@ func checkLogDirs(c *checker, b *metrics.Batch) {
 	}
 }
 
-// checkTruncation reconciles the declared truncation and limits blocks against
-// what the per-entity counts imply. Presence of the block is the contract: "nil
-// means complete" is only worth something if a short list can never appear
-// without it.
-func checkTruncation(c *checker, b *metrics.Batch, implied metrics.Truncation) {
+// checkTruncation reconciles the declared truncation block against the sections.
+//
+// It covers errors[] only. No cap shortens an entity list any more, so a short
+// list is a sender bug rather than a declared state -- countCheck fails on it
+// directly, and there is nothing left here to reconcile.
+func checkTruncation(c *checker, b *metrics.Batch) {
 	for i, e := range b.Errors {
 		if e.Count < 0 {
 			c.fail("errors.negative_count", fmt.Sprintf("$.errors[%d]", i),
@@ -784,53 +776,23 @@ func checkTruncation(c *checker, b *metrics.Batch, implied metrics.Truncation) {
 		}
 	}
 
-	if b.Limits != nil && b.Limits.MaxErrors > 0 && len(b.Errors) > b.Limits.MaxErrors {
-		c.fail("errors.cap_exceeded", "$.errors",
-			"%d errors on the wire but the batch declares max_errors=%d",
-			len(b.Errors), b.Limits.MaxErrors)
+	if s := b.Selection; s != nil && s.TopicInclude == "" && s.TopicExclude == "" &&
+		s.GroupInclude == "" && s.GroupExclude == "" &&
+		len(s.GroupStates) == 0 && !s.IncludeInternalTopics {
+		c.fail("selection.empty", "$.selection",
+			"selection block is present with every field empty; its presence is what says "+
+				"the batch covers less than the whole cluster")
 	}
 
 	t := b.Truncation
 	if t == nil {
-		for i, sec := range b.Sections {
-			if sec.Truncated {
-				c.fail("truncation.section_unaccounted", fmt.Sprintf("$.sections[%d]", i),
-					"section %q is marked truncated but the batch declares no truncation block",
-					sec.Name)
-			}
-		}
 		return
 	}
 
 	if *t == (metrics.Truncation{}) {
 		c.fail("truncation.empty", "$.truncation",
 			"truncation block is present with every counter zero; its presence is what means "+
-				"the batch is incomplete, so an empty one makes a complete batch look short")
-	}
-
-	entities := t.Topics + t.Partitions + t.Groups + t.Members + t.Offsets
-	if entities > 0 && b.Limits == nil {
-		c.fail("truncation.no_limits", "$.limits",
-			"%d entities were truncated but no limits block says which cap did it", entities)
-	}
-
-	// Only under-reporting is an error. Dropping a whole topic also drops its
-	// partitions, and those are not visible as a per-topic shortfall, so the
-	// declared count is legitimately the larger of the two.
-	if t.Partitions < implied.Partitions {
-		c.fail("truncation.partitions", "$.truncation",
-			"declares %d dropped partitions but the per-topic counts imply at least %d",
-			t.Partitions, implied.Partitions)
-	}
-	if t.Members < implied.Members {
-		c.fail("truncation.members", "$.truncation",
-			"declares %d dropped members but the per-group counts imply at least %d",
-			t.Members, implied.Members)
-	}
-	if t.Offsets < implied.Offsets {
-		c.fail("truncation.offsets", "$.truncation",
-			"declares %d dropped offsets but the per-group counts imply at least %d",
-			t.Offsets, implied.Offsets)
+				"errors[] is incomplete, so an empty one makes a complete batch look short")
 	}
 
 	var secCollapsed, secDropped int

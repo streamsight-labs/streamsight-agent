@@ -112,21 +112,40 @@ type Batch struct {
 	// Truncation is nil on a complete batch. Non-nil means at least one of its
 	// counters is non-zero and the corresponding list is short.
 	Truncation *Truncation `json:"truncation,omitempty"`
-	// Limits echoes the caps that produced this batch, so a backend can tell
-	// "the cluster has 40 topics" from "the agent was told to ship 40". Nil
-	// when every cap is unlimited.
-	Limits *Limits `json:"limits,omitempty"`
+	// Selection echoes the filters that decided what this batch covers, so a
+	// backend can tell "the cluster has 40 topics" from "the agent was pointed
+	// at 40 of them". Nil means nothing was filtered: the batch describes the
+	// whole cluster.
+	//
+	// Filtering is invisible in the payload otherwise -- an excluded topic is
+	// simply absent, with no counter anywhere saying it existed -- which is
+	// exactly why the configuration has to travel with the data.
+	Selection *Selection `json:"selection,omitempty"`
+}
+
+// Selection is the filter configuration in force for a batch. Every field is
+// omitted when unset, and the whole block is absent when nothing narrows the
+// view.
+type Selection struct {
+	TopicInclude string `json:"topic_include,omitempty"`
+	TopicExclude string `json:"topic_exclude,omitempty"`
+	GroupInclude string `json:"group_include,omitempty"`
+	GroupExclude string `json:"group_exclude,omitempty"`
+	// GroupStates is filtered by the BROKER, so the groups it removes never
+	// reach the agent at all.
+	GroupStates []string `json:"group_states,omitempty"`
+	// IncludeInternalTopics widens the view rather than narrowing it, and is
+	// echoed for the same reason: it changes what the batch covers.
+	IncludeInternalTopics bool `json:"include_internal_topics,omitempty"`
 }
 
 // Truncation counts what a cycle collected but did not ship. The counts travel
-// even when the entities do not, turning a silent falsehood into a known
-// unknown.
+// even when the entries do not, turning a silent falsehood into a known unknown.
+//
+// It covers errors[] only. No cap shortens the inventory itself: topics,
+// partitions, groups and offsets are either all shipped or the section says it
+// failed, so there is no third state for a consumer to reason about.
 type Truncation struct {
-	Topics     int `json:"topics,omitempty"`
-	Partitions int `json:"partitions,omitempty"`
-	Groups     int `json:"groups,omitempty"`
-	Members    int `json:"members,omitempty"`
-	Offsets    int `json:"offsets,omitempty"`
 	// ErrorsCollapsed is occurrences folded into an existing entry's Count by
 	// deduplication. Nothing is lost: the total survives in Count.
 	ErrorsCollapsed int `json:"errors_collapsed,omitempty"`
@@ -136,25 +155,8 @@ type Truncation struct {
 
 // Add accumulates one section's drops into a batch-level total.
 func (t *Truncation) Add(o Truncation) {
-	t.Topics += o.Topics
-	t.Partitions += o.Partitions
-	t.Groups += o.Groups
-	t.Members += o.Members
-	t.Offsets += o.Offsets
 	t.ErrorsCollapsed += o.ErrorsCollapsed
 	t.ErrorsDropped += o.ErrorsDropped
-}
-
-// Limits is the cap configuration in force for a batch. Zero means unlimited,
-// which is the default for every entity cap.
-type Limits struct {
-	MaxErrors             int `json:"max_errors,omitempty"`
-	MaxErrorSamples       int `json:"max_error_samples,omitempty"`
-	MaxTopics             int `json:"max_topics,omitempty"`
-	MaxPartitionsPerTopic int `json:"max_partitions_per_topic,omitempty"`
-	MaxGroups             int `json:"max_groups,omitempty"`
-	MaxMembersPerGroup    int `json:"max_members_per_group,omitempty"`
-	MaxOffsetsPerGroup    int `json:"max_offsets_per_group,omitempty"`
 }
 
 // SectionStatus is a CLOSED enum in schema version 1: a v1 consumer may switch

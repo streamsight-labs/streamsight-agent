@@ -6,52 +6,22 @@ import (
 	"kafka-metrics-agent/internal/metrics"
 )
 
-// Limits caps what one batch may contain.
+// Limits bounds errors[], and nothing else.
 //
-// Every entity cap defaults to 0 = unlimited: a non-zero default would be an
-// untested guess that silently changes the customer's core data on first
-// deploy. Caps are per-parent, so the batch bound is a product — MaxGroups ×
-// MaxOffsetsPerGroup bounds the term that dominates the payload.
-//
-// Only MaxTopics and MaxGroups reduce broker load, by shrinking the argument
-// lists of ListStartOffsets/ListEndOffsets and DescribeGroups/FetchManyOffsets.
-// MaxPartitionsPerTopic does NOT: kadm's List*Offsets take topic names, so the
-// broker computes every partition regardless — it is a payload cap only.
+// No cap shortens the inventory. Topics, partitions, groups and offsets are
+// either all shipped or the section reports why it could not be completed --
+// there is deliberately no third state where a batch quietly describes part of
+// a cluster as though it were the whole one. What a deployment does NOT want to
+// watch is said in TOPIC_INCLUDE_REGEX and friends, which is a decision written
+// down rather than an arbitrary prefix of a sorted list.
 type Limits struct {
-	// MaxErrors bounds Batch.Errors. It is the one cap defaulted ON, and behind
-	// deduplication it essentially never fires.
+	// MaxErrors bounds Batch.Errors. Behind deduplication it essentially never
+	// fires: errors[] is already bounded by the number of distinct failure
+	// modes, so this is a backstop against a pathological cluster.
 	MaxErrors int
 	// MaxErrorSamples is how many verbatim occurrences of one deduplication key
 	// are emitted before the rest fold into the exemplar's Count. Below 1 means 1.
 	MaxErrorSamples int
-
-	MaxTopics             int
-	MaxPartitionsPerTopic int
-	MaxGroups             int
-	MaxMembersPerGroup    int
-	MaxOffsetsPerGroup    int
-}
-
-// any reports whether any ENTITY cap is set, which decides whether the batch
-// echoes a limits block. The caps with a non-zero default — the two error caps
-// — are excluded because they would make any() unconditionally true and
-// contradict Batch.Limits' "nil when every cap is unlimited". They are still
-// echoed by wire() whenever the block is emitted.
-func (l Limits) any() bool {
-	return l.MaxTopics != 0 || l.MaxPartitionsPerTopic != 0 || l.MaxGroups != 0 ||
-		l.MaxMembersPerGroup != 0 || l.MaxOffsetsPerGroup != 0
-}
-
-func (l Limits) wire() *metrics.Limits {
-	return &metrics.Limits{
-		MaxErrors:             l.MaxErrors,
-		MaxErrorSamples:       l.MaxErrorSamples,
-		MaxTopics:             l.MaxTopics,
-		MaxPartitionsPerTopic: l.MaxPartitionsPerTopic,
-		MaxGroups:             l.MaxGroups,
-		MaxMembersPerGroup:    l.MaxMembersPerGroup,
-		MaxOffsetsPerGroup:    l.MaxOffsetsPerGroup,
-	}
 }
 
 // errorSamples is MaxErrorSamples clamped to at least one; zero would emit no
@@ -74,6 +44,8 @@ func (l Limits) perSectionErrorBudget() int {
 
 // capLen returns how many of n elements to keep and how many are dropped. A
 // ceiling of zero or less means unlimited.
+// capLen bounds a slice against a ceiling from a CONSTANT -- the epoch-probe
+// fan-out is the only caller left. No operator setting reaches it.
 func capLen(n, ceiling int) (keep, dropped int) {
 	if ceiling <= 0 || n <= ceiling {
 		return n, 0

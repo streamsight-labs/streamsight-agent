@@ -115,7 +115,6 @@ func New(cfg *config.Config, version string) (*Agent, error) {
 		MaxRetries: cfg.ExportMaxRetries,
 		BaseDelay:  cfg.ExportBaseDelay,
 		Timeout:    cfg.ExportTimeout,
-		Gzip:       cfg.ExportGzip,
 		Path:       cfg.ExportFile,
 		MaxMB:      cfg.ExportFileMaxMB,
 		MaxBackups: cfg.ExportFileMaxBackups,
@@ -214,20 +213,20 @@ func collectorOptions(cfg *config.Config, logger *slog.Logger) collector.Options
 		CollectMaxTimestamp:     cfg.CollectMaxTimestamp,
 		MaxTimestampEvery:       cfg.MaxTimestampEvery,
 		CollectTieredOffsets:    cfg.CollectTieredOffsets,
-		CollectLatestTiered:     cfg.CollectLatestTiered,
 		CollectShareGroups:      cfg.CollectShareGroups,
-		CollectReassignments:    cfg.CollectReassignments,
-		CollectEpochProbes:      cfg.CollectEpochProbes,
-		CollectRPCStats:         cfg.CollectRPCStats,
+
+		// Not configurable, and deliberately: the remote end offset always
+		// follows the tiered phase that asks for it, and the two triggered
+		// phases issue nothing until a URP or an epoch mismatch appears. Each is
+		// still a field because applyCapabilityGates clears it on a cluster that
+		// cannot serve the request.
+		CollectLatestTiered:  true,
+		CollectReassignments: true,
+		CollectEpochProbes:   true,
 
 		Limits: collector.Limits{
-			MaxErrors:             cfg.MaxErrors,
-			MaxErrorSamples:       cfg.MaxErrorSamples,
-			MaxTopics:             cfg.MaxTopics,
-			MaxPartitionsPerTopic: cfg.MaxPartitionsPerTopic,
-			MaxGroups:             cfg.MaxGroups,
-			MaxMembersPerGroup:    cfg.MaxMembersPerGroup,
-			MaxOffsetsPerGroup:    cfg.MaxOffsetsPerGroup,
+			MaxErrors:       cfg.MaxErrors,
+			MaxErrorSamples: cfg.MaxErrorSamples,
 		},
 		Logger: logger,
 	}

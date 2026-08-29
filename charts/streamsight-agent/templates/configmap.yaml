@@ -23,7 +23,6 @@ data:
   EXPORT_MAX_RETRIES: {{ .Values.export.http.maxRetries | int | quote }}
   EXPORT_BASE_DELAY: {{ .Values.export.http.baseDelay | quote }}
   EXPORT_TIMEOUT: {{ .Values.export.http.timeout | quote }}
-  EXPORT_GZIP: {{ .Values.export.http.gzip | quote }}
   {{- end }}
   {{- if eq $mode "file" }}
   EXPORT_FILE: {{ .Values.export.file.path | quote }}
@@ -94,13 +93,7 @@ data:
   {{- end }}
   {{- end }}
   COLLECT_TIERED_OFFSETS: {{ .Values.collection.collectTieredOffsets | quote }}
-  {{- if .Values.collection.collectTieredOffsets }}
-  COLLECT_LATEST_TIERED: {{ .Values.collection.collectLatestTiered | quote }}
-  {{- end }}
   COLLECT_SHARE_GROUPS: {{ .Values.collection.collectShareGroups | quote }}
-  COLLECT_REASSIGNMENTS: {{ .Values.collection.collectReassignments | quote }}
-  COLLECT_EPOCH_PROBES: {{ .Values.collection.collectEpochProbes | quote }}
-  COLLECT_RPC_STATS: {{ .Values.collection.collectRpcStats | quote }}
 
   # -- Cardinality caps ---------------------------------------------------
   # Only the caps that are set are rendered: the agent's own default for an
@@ -108,21 +101,6 @@ data:
   # deliberate choice rather than an absent one.
   MAX_ERRORS: {{ .Values.limits.maxErrors | int | quote }}
   MAX_ERROR_SAMPLES: {{ .Values.limits.maxErrorSamples | int | quote }}
-  {{- if .Values.limits.maxTopics }}
-  MAX_TOPICS: {{ .Values.limits.maxTopics | int | quote }}
-  {{- end }}
-  {{- if .Values.limits.maxPartitionsPerTopic }}
-  MAX_PARTITIONS_PER_TOPIC: {{ .Values.limits.maxPartitionsPerTopic | int | quote }}
-  {{- end }}
-  {{- if .Values.limits.maxGroups }}
-  MAX_GROUPS: {{ .Values.limits.maxGroups | int | quote }}
-  {{- end }}
-  {{- if .Values.limits.maxMembersPerGroup }}
-  MAX_MEMBERS_PER_GROUP: {{ .Values.limits.maxMembersPerGroup | int | quote }}
-  {{- end }}
-  {{- if .Values.limits.maxOffsetsPerGroup }}
-  MAX_OFFSETS_PER_GROUP: {{ .Values.limits.maxOffsetsPerGroup | int | quote }}
-  {{- end }}
 
   # -- Agent --------------------------------------------------------------
   LOG_LEVEL: {{ .Values.agent.logLevel | quote }}

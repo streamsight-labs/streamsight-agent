@@ -220,32 +220,29 @@ func noOffsets() (starts, lsos, ends offsetSample) {
 	return offsetSample{}, offsetSample{}, offsetSample{}
 }
 
-func TestPartitionCountIsPreTruncation(t *testing.T) {
-	c := truncatingCollector(t, Limits{MaxPartitionsPerTopic: 2})
+// No cap shortens a partition list, so the declared count and the list must
+// agree exactly -- which is what the ingest's data.partition_count check
+// enforces at the far end.
+func TestPartitionCountMatchesTheEmittedList(t *testing.T) {
+	c := truncatingCollector(t, Limits{})
 	sec := newSection(sectionTopics)
 	starts, lsos, ends := noOffsets()
 
 	tm := c.buildTopic(topicWithPartitions(5), sec, starts, lsos, ends, offsetSample{}, offsetSample{}, offsetSample{})
 
-	if tm.PartitionCount != 5 {
-		t.Errorf("PartitionCount = %d, want the true pre-truncation 5", tm.PartitionCount)
+	if tm.PartitionCount != 5 || len(tm.Partitions) != 5 {
+		t.Errorf("PartitionCount = %d with %d partitions emitted, want 5 and 5",
+			tm.PartitionCount, len(tm.Partitions))
 	}
-	if len(tm.Partitions) != 2 {
-		t.Fatalf("emitted %d partitions, want 2", len(tm.Partitions))
-	}
-	// Prefix truncation, so the kept IDs are stable across cycles.
-	if tm.Partitions[0].ID != 0 || tm.Partitions[1].ID != 1 {
-		t.Errorf("emitted partitions %d, %d; want the sorted prefix 0, 1", tm.Partitions[0].ID, tm.Partitions[1].ID)
-	}
-	if sec.dropped.Partitions != 3 || !sec.truncated {
-		t.Errorf("section dropped = %d, truncated = %v; want 3 and true", sec.dropped.Partitions, sec.truncated)
+	if sec.truncated {
+		t.Error("nothing can truncate a partition list, so the section must not say it did")
 	}
 }
 
-func TestReplicationFactorIgnoresPartitionTruncation(t *testing.T) {
-	// Deriving the durability floor from the emitted prefix would let a
-	// truncated topic advertise a replication factor it does not have.
-	c := truncatingCollector(t, Limits{MaxPartitionsPerTopic: 2})
+func TestReplicationFactorIsTheMinimumOverEveryPartition(t *testing.T) {
+	// The durability floor is a minimum, not a sample: one under-replicated
+	// partition has to drag it down however many others are healthy.
+	c := truncatingCollector(t, Limits{})
 	sec := newSection(sectionTopics)
 	starts, lsos, ends := noOffsets()
 

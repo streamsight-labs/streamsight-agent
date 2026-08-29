@@ -89,7 +89,6 @@ type HTTPExporter struct {
 	client   *http.Client
 	endpoint string
 	apiKey   string
-	gzip     bool
 
 	queue chan queued
 	wg    sync.WaitGroup
@@ -123,9 +122,6 @@ type HTTPExporterConfig struct {
 	MaxRetries int
 	BaseDelay  time.Duration
 	Timeout    time.Duration
-	// Gzip compresses the request body. The payload is highly repetitive, so
-	// this is typically an 85-90% reduction.
-	Gzip bool
 }
 
 // NewHTTPExporter builds the exporter and starts its single worker. Only a
@@ -152,7 +148,6 @@ func NewHTTPExporter(cfg HTTPExporterConfig) *HTTPExporter {
 		client:        &http.Client{Timeout: cfg.Timeout},
 		endpoint:      cfg.Endpoint,
 		apiKey:        cfg.APIKey,
-		gzip:          cfg.Gzip,
 		queue:         make(chan queued, cfg.QueueSize),
 		done:          make(chan struct{}),
 		ctx:           ctx,
@@ -189,7 +184,7 @@ func (e *HTTPExporter) Export(ctx context.Context, batch *metrics.Batch) error {
 	// Encoded before the lock: marshal and gzip are pure work on a batch nobody
 	// else can see yet, and holding the lock across them would put the whole
 	// encode inside Close's window.
-	body, err := encodeBody(batch, e.gzip)
+	body, err := encodeBody(batch)
 	if err != nil {
 		// A marshal failure is not transient -- retrying would re-encode the
 		// same unencodable batch -- so it is dropped here rather than queued.
@@ -417,9 +412,8 @@ func (e *HTTPExporter) send(q queued) error {
 	// Lets the ingest deduplicate a batch that was delivered but whose 200 we
 	// never saw.
 	req.Header.Set("Idempotency-Key", q.key)
-	if e.gzip {
-		req.Header.Set("Content-Encoding", "gzip")
-	}
+	// Every body this exporter sends is gzipped, so the header is unconditional.
+	req.Header.Set("Content-Encoding", "gzip")
 
 	resp, err := e.client.Do(req)
 	if err != nil {
@@ -443,13 +437,13 @@ func (e *HTTPExporter) send(q queued) error {
 	return nil
 }
 
-func encodeBody(batch *metrics.Batch, compress bool) ([]byte, error) {
+// encodeBody marshals the batch and gzips it. Compression is not optional: the
+// payload is highly repetitive JSON, so this is an 85-90% reduction on every
+// batch, and making it a switch only ever bought an operator a bigger bill.
+func encodeBody(batch *metrics.Batch) ([]byte, error) {
 	data, err := encodeLine(batch)
 	if err != nil {
 		return nil, err
-	}
-	if !compress {
-		return data, nil
 	}
 
 	var buf bytes.Buffer

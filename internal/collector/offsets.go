@@ -11,16 +11,9 @@ import (
 // This phase runs BEFORE end offsets are listed. Both halves of lag are sampled
 // at different instants; taking the committed half first means the end offset is
 // the fresher number and lag errs high instead of going negative.
-//
-// listDropped is how many groups MaxGroups removed from the shared listing, so
-// this section reports itself truncated by exactly as much as groups[] does.
-func (c *Collector) collectOffsets(ctx context.Context, ids []string, listDropped int, listErr error, internal map[string]bool) ([]metrics.ConsumerOffset, *section) {
+func (c *Collector) collectOffsets(ctx context.Context, ids []string, listErr error, internal map[string]bool) ([]metrics.ConsumerOffset, *section) {
 	sec := c.newSection(sectionOffsets)
 	defer sec.stop()
-
-	if listDropped > 0 {
-		sec.truncated = true
-	}
 
 	sec.request("ListGroups", listErr)
 	if len(ids) == 0 {
@@ -50,7 +43,7 @@ func (c *Collector) collectOffsets(ctx context.Context, ids []string, listDroppe
 		}
 
 		offsets := make([]metrics.PartitionOffset, 0, len(resp.Fetched))
-		emitted, dropped := 0, 0
+		emitted := 0
 		for _, o := range resp.Fetched.Sorted() {
 			if internal[o.Topic] && !c.opts.IncludeInternalTopics {
 				continue
@@ -58,14 +51,6 @@ func (c *Collector) collectOffsets(ctx context.Context, ids []string, listDroppe
 			if !c.topics.allow(o.Topic) {
 				continue
 			}
-			// The cap counts EMITTED offsets, so a filtered topic never consumes
-			// budget. `continue` rather than `break`: the loop must keep counting
-			// to produce a true offset_count.
-			if ceiling := c.limits.MaxOffsetsPerGroup; ceiling > 0 && emitted >= ceiling {
-				dropped++
-				continue
-			}
-
 			po := metrics.PartitionOffset{
 				Topic:       o.Topic,
 				Partition:   o.Partition,
@@ -80,17 +65,13 @@ func (c *Collector) collectOffsets(ctx context.Context, ids []string, listDroppe
 			offsets = append(offsets, po)
 			emitted++
 		}
-		if dropped > 0 {
-			sec.dropped.Offsets += dropped
-			sec.truncated = true
-		}
-
 		result = append(result, metrics.ConsumerOffset{
 			GroupID: id,
 			Offsets: offsets,
-			// The true post-filter, pre-cap count. offsets[] is the only entity
-			// list with no other count to compare len() against.
-			OffsetCount: emitted + dropped,
+			// Equal to len(Offsets): nothing caps the list. Kept because offsets[]
+			// is the only entity list with no other count to compare len()
+			// against, so the field is what makes a short list detectable at all.
+			OffsetCount: emitted,
 		})
 	}
 

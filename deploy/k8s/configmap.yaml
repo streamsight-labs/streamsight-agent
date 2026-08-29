@@ -39,7 +39,6 @@ data:
   # EXPORT_MAX_RETRIES: "3"     # retries per batch on 408/429/5xx
   # EXPORT_BASE_DELAY: "1s"     # full-jitter backoff base
   # EXPORT_TIMEOUT: "10s"       # per-request deadline
-  # EXPORT_GZIP: "true"
 
   # -- Collection ---------------------------------------------------------
   # Left unset on purpose: the agent's own default (currently 5s) applies, and
@@ -78,9 +77,9 @@ data:
   # days-to-full, per-topic storage and byte-rate-per-record all rest on it.
   # The response is O(replicas) = partitions x replication factor and is the
   # largest section emitted, which is what LOG_DIRS_EVERY is for. On a wide
-  # cluster set MAX_PARTITIONS_PER_TOPIC below -- unlike the offset listings,
-  # the log-dir request names partitions explicitly, so that cap shrinks the
-  # request itself and not just the payload.
+  # cluster narrow TOPIC_INCLUDE_REGEX/TOPIC_EXCLUDE_REGEX -- unlike the offset
+  # listings, the log-dir request names partitions explicitly, so the filter
+  # shrinks the request itself and not just the payload.
   COLLECT_LOG_DIRS: "true"
   # Cadence for the log-dirs phase. Must be >= 1 (1 = every cycle). Unset uses
   # the agent default, currently 24 = every two minutes at the 5s interval.
@@ -103,22 +102,15 @@ data:
   # 5s interval, the slowest cadence in the agent.
   # CONFIGS_EVERY: "360"
 
-  # -- Cardinality caps ---------------------------------------------------
-  # Hard ceilings on one batch. Every ENTITY cap defaults to 0 = unlimited,
-  # deliberately: a non-zero default would silently shorten the customer's own
-  # inventory on first deploy. Prefer the include regexes above for
-  # intentional selection. None of these adds a request or an ACL, and each
-  # one that is set logs a startup warning.
+  # -- Error caps ---------------------------------------------------------
+  # The only caps there are. Nothing shortens the inventory: a batch describes
+  # every topic, partition, group and offset it was pointed at, or a section
+  # says why it could not. Use the regexes above to decide what to point it at.
   #
   # MAX_ERRORS backstops errors[], which is deduplicated unconditionally, so
   # it essentially never fires. 0 = unlimited (and warns).
   # MAX_ERRORS: "1000"
   # MAX_ERROR_SAMPLES: "1"        # verbatim samples per distinct failure mode; >= 1
-  # MAX_TOPICS: "0"               # also shrinks the offset and log-dir requests
-  # MAX_PARTITIONS_PER_TOPIC: "0" # payload cap; also shrinks the log-dir request
-  # MAX_GROUPS: "0"               # ALSO truncates the offsets section, not just groups
-  # MAX_MEMBERS_PER_GROUP: "0"
-  # MAX_OFFSETS_PER_GROUP: "0"
 
   # -- Agent --------------------------------------------------------------
   LOG_LEVEL: "info" # debug | info | warn | error

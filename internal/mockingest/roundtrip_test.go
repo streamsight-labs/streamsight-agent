@@ -58,7 +58,6 @@ func newExporter(t *testing.T, endpoint string, mutate func(*export.HTTPExporter
 	cfg := export.HTTPExporterConfig{
 		Endpoint:   endpoint,
 		APIKey:     "k",
-		Gzip:       true,
 		MaxRetries: 6,
 		BaseDelay:  time.Millisecond,
 		Timeout:    2 * time.Second,
@@ -110,26 +109,18 @@ func fatalCodes(s *Server) []string {
 }
 
 func TestExporterHappyPath(t *testing.T) {
-	for _, gz := range []bool{true, false} {
-		name := "gzip"
-		if !gz {
-			name = "plain"
-		}
-		t.Run(name, func(t *testing.T) {
-			s, url, _ := newLive(t, nil)
-			e := newExporter(t, url, func(c *export.HTTPExporterConfig) { c.Gzip = gz })
+	s, url, _ := newLive(t, nil)
+	e := newExporter(t, url, nil)
 
-			st := shipAndSettle(t, e, 1, 2, 3)
-			if st.BatchesExported != 3 || st.BatchesDropped != 0 || st.BatchesRejected != 0 {
-				t.Fatalf("exporter stats = %+v", st)
-			}
-			if got := s.Stats(); got.OK != 3 || got.Accepted != 3 {
-				t.Fatalf("server stats = %+v", got)
-			}
-			if got := fatalCodes(s); len(got) != 0 {
-				t.Fatalf("conformance failures: %v", got)
-			}
-		})
+	st := shipAndSettle(t, e, 1, 2, 3)
+	if st.BatchesExported != 3 || st.BatchesDropped != 0 || st.BatchesRejected != 0 {
+		t.Fatalf("exporter stats = %+v", st)
+	}
+	if got := s.Stats(); got.OK != 3 || got.Accepted != 3 {
+		t.Fatalf("server stats = %+v", got)
+	}
+	if got := fatalCodes(s); len(got) != 0 {
+		t.Fatalf("conformance failures: %v", got)
 	}
 }
 

@@ -167,21 +167,21 @@ on by default. `ListEndOffsets` is structurally exempt because it asks with `-1`
 
 | Phase | Requests |
 |---|---|
-| `reassignments` | 1 request to the controller, only when a URP is in this batch's `topics[]`, at most 1000 partitions named. Normally zero. **On by default** |
-| `epoch_probes` | 0 in steady state; up to 4 sharded `OffsetForLeaderEpoch` in the cycle after a leader election, then 0 again — the question is remembered once a leader answers it, not re-asked. **On by default** |
+| `reassignments` | 1 request to the controller, only when a URP is in this batch's `topics[]`, at most 1000 partitions named. Normally zero. **Always on** |
+| `epoch_probes` | 0 in steady state; up to 4 sharded `OffsetForLeaderEpoch` in the cycle after a leader election, then 0 again — the question is remembered once a leader answers it, not re-asked. **Always on** |
 
 **Opt-in — zero unless switched on**
 
 | Phase | Requests |
 |---|---|
-| `topics_local_start` / `topics_remote_end` | 0 at the defaults; 1 or 2 further `ListOffsets` fan-outs with `COLLECT_TIERED_OFFSETS`, the second gated again on `COLLECT_LATEST_TIERED` because KIP-1005 landed five releases after KIP-405 and a 3.4–3.8 cluster serves `-4` but not `-5`. Both carry the re-list above |
+| `topics_local_start` / `topics_remote_end` | 0 at the defaults; 1 or 2 further `ListOffsets` fan-outs with `COLLECT_TIERED_OFFSETS`, the second dropped by the startup capability probe — not by a second setting — because KIP-1005 landed five releases after KIP-405 and a 3.4–3.8 cluster serves `-4` but not `-5`. Both carry the re-list above |
 | `share_groups` | 0 at the defaults; with `COLLECT_SHARE_GROUPS` on a 4.0+ cluster, **2** coordinator-sharded requests — `ShareGroupDescribe` and `DescribeShareGroupOffsets` — and only for the groups the shared `ListGroups` already reported with `GroupType: share`, so a cluster with no share groups pays nothing but the listing it was making anyway |
 
 **No request at all**
 
 | Phase | Requests |
 |---|---|
-| `broker_rpc` | 0 — kgo hook counters detached and reset per cycle. Zero requests, but the largest *unmeasured* contributor to batch size: O(`B` × API keys issued), two 12-bucket histograms per API row. **On by default** |
+| `broker_rpc` | 0 — kgo hook counters detached and reset per cycle. Zero requests, but the largest *unmeasured* contributor to batch size: O(`B` × API keys issued), two 12-bucket histograms per API row. **Always on** |
 
 At the defaults that is roughly `4·L + 3·B` requests per cycle, plus 1 `Metadata` for the
 `cluster` section, `B` more on a log-dirs cycle and `1 + B` more on a configs cycle. The four
@@ -196,9 +196,10 @@ fourth.
 Seven of the seventeen sections add nothing to a healthy cluster at the defaults: four are
 opt-in and off (`topics_window`, `topics_local_start`, `topics_remote_end`, `share_groups`),
 two are triggered and silent (`reassignments`, `epoch_probes`), and one drains an accumulator
-(`broker_rpc`). All seven still ship a section every cycle. `COLLECT_RPC_STATS` is the only
-setting that adds meaningful bytes without adding a request; nothing the agent does issues a
-request *between* cycles.
+(`broker_rpc`). All seven still ship a section every cycle. The last three carry no setting
+at all — nothing to trade, so nothing to configure — and `broker_rpc` is the only phase that
+adds meaningful bytes without adding a request; nothing the agent does issues a request
+*between* cycles.
 
 kadm asks for metadata five times in a default cycle — once for the `cluster` section and
 once inside each of the four `List*Offsets`, which each begin with a `ListTopics` — and only
@@ -222,9 +223,10 @@ lifetime, so the `GROUP_STATES` check, every optional phase's capability gate an
   `windowDone`, `committedDone`, `endDone`. Eleven are in the `WaitGroup`; the twelfth is the
   `ListGroups` publisher, which signals by closing `groupsListed` rather than by `wg.Done`.
 * `ListGroups` runs once per cycle and its result feeds `groups`, `offsets` and
-  `share_groups`, so those sections can never disagree about which groups exist. `MAX_GROUPS`
-  is enforced there and nowhere else, which is why it truncates all of them. `share_groups`
-  reads the raw response for its `GroupType` filter — the same broadcast, not a second one.
+  `share_groups`, so those sections can never disagree about which groups exist. The
+  `GROUP_INCLUDE_REGEX`/`GROUP_EXCLUDE_REGEX` filter is applied there and nowhere else, which
+  is why it narrows all of them together. `share_groups` reads the raw response for its
+  `GroupType` filter — the same broadcast, not a second one.
 * `log_dirs`, `topics_window`, `topic_configs` and `broker_configs` share one process-local
   0-based cycle counter (`collector.go:282-289`), so a fresh agent samples each on its first
   cycle rather than N intervals in. A crash-looping agent therefore samples every cycle; that

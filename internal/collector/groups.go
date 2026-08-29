@@ -22,7 +22,7 @@ import (
 // in each phase would let the two sections disagree about which groups exist —
 // a data integrity bug, not a payload one. listed.Sorted() makes the retained
 // prefix the same set every cycle.
-func (c *Collector) listGroups(ctx context.Context) (ids []string, types map[string]string, dropped int, err error) {
+func (c *Collector) listGroups(ctx context.Context) (ids []string, types map[string]string, err error) {
 	listed, types, err := c.listGroupsWithTypes(ctx)
 
 	ids = make([]string, 0, len(listed))
@@ -35,8 +35,7 @@ func (c *Collector) listGroups(ctx context.Context) (ids []string, types map[str
 		}
 		ids = append(ids, g)
 	}
-	keep, dropped := capLen(len(ids), c.limits.MaxGroups)
-	return ids[:keep], types, dropped, err
+	return ids, types, err
 }
 
 // listGroupsWithTypes issues the ListGroups broadcast this cycle needs anyway,
@@ -87,16 +86,10 @@ func (c *Collector) listGroupsWithTypes(ctx context.Context) ([]string, map[stri
 }
 
 // collectGroups describes every listed group. listedAt is when the shared
-// ListGroups call was issued, so SampledAt covers the listing too. listDropped
-// is how many groups MaxGroups removed: the count is reported once at batch
-// level, but this section must still admit it is short.
-func (c *Collector) collectGroups(ctx context.Context, ids []string, types map[string]string, listDropped int, listErr error, listedAt time.Time) ([]metrics.GroupMetrics, *section) {
+// ListGroups call was issued, so SampledAt covers the listing too.
+func (c *Collector) collectGroups(ctx context.Context, ids []string, types map[string]string, listErr error, listedAt time.Time) ([]metrics.GroupMetrics, *section) {
 	sec := c.newSectionAt(sectionGroups, listedAt)
 	defer sec.stop()
-
-	if listDropped > 0 {
-		sec.truncated = true
-	}
 
 	sec.request("ListGroups", listErr)
 	if len(ids) == 0 {
@@ -131,17 +124,16 @@ func (c *Collector) collectGroups(ctx context.Context, ids []string, types map[s
 			sec.recordGroup("DescribeGroups", g.Group, g.Err)
 		}
 
+		// Every member, uncapped: the list is bounded by the consumers the
+		// customer actually runs, and DescribeGroups returns all of them
+		// whatever we do, so a cap would have deleted rows the cluster had
+		// already paid to produce.
+		//
 		// kadm sorts DescribedGroup.Members by InstanceID (nil last) then
-		// MemberID (kadm@v1.18.0 groups.go:401), so the retained prefix is
-		// stable across cycles without sorting here.
-		keep, droppedMembers := capLen(len(g.Members), c.limits.MaxMembersPerGroup)
-		if droppedMembers > 0 {
-			sec.dropped.Members += droppedMembers
-			sec.truncated = true
-		}
-
-		members := make([]metrics.GroupMember, 0, keep)
-		for _, m := range g.Members[:keep] {
+		// MemberID (kadm@v1.18.0 groups.go:401), so the order is stable across
+		// cycles without sorting here.
+		members := make([]metrics.GroupMember, 0, len(g.Members))
+		for _, m := range g.Members {
 			member := metrics.GroupMember{
 				MemberID:   m.MemberID,
 				InstanceID: m.InstanceID,
@@ -182,10 +174,9 @@ func (c *Collector) collectGroups(ctx context.Context, ids []string, types map[s
 			members = append(members, member)
 		}
 
-		// The PRE-truncation count, so len(members) < member_count says the
-		// member list was cut. Generation is derived from the emitted members, so
-		// a truncated group under-reports it — one more reason
-		// MaxMembersPerGroup defaults to unlimited.
+		// Equal to len(members) now that nothing caps the list, and kept as its
+		// own field because the wire contract is "the count is taken before any
+		// cap": a consumer must be able to read it without knowing that.
 		gm.MemberCount = len(g.Members)
 		gm.Members = members
 		groups = append(groups, gm)
@@ -252,8 +243,9 @@ func applyConsumerGroup(gm *metrics.GroupMetrics, d kadm.DescribedConsumerGroup)
 	for _, m := range d.Members {
 		byID[m.MemberID] = m
 	}
-	// Iterate the members already emitted, so MaxMembersPerGroup still bounds the
-	// list and the two describes cannot disagree about which members exist.
+	// Iterate the members already emitted rather than the overlay's own list, so
+	// the two describes cannot disagree about which members exist -- the classic
+	// describe is the one that decides.
 	for j := range gm.Members {
 		m, ok := byID[gm.Members[j].MemberID]
 		if !ok {

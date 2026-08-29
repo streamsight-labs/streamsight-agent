@@ -87,9 +87,10 @@ type Options struct {
 	// the same answer as the start offsets already collected.
 	CollectTieredOffsets bool
 	// CollectLatestTiered additionally asks for the remote end offset at
-	// timestamp -5 (KIP-1005, Kafka 3.9+). Gated apart from the local start
-	// because KIP-1005 landed five releases later, so 3.4-3.8 serves one and not
-	// the other. Ignored when CollectTieredOffsets is false.
+	// timestamp -5 (KIP-1005, Kafka 3.9+). It is not an operator switch: it
+	// always follows CollectTieredOffsets, and the only thing that clears it is
+	// the capability gate, because KIP-1005 landed five releases after KIP-405
+	// and a 3.4-3.8 cluster serves the local start and not the remote end.
 	CollectLatestTiered bool
 
 	// CollectShareGroups adds the share_groups section (KIP-932, Kafka 4.0+).
@@ -126,18 +127,15 @@ type Options struct {
 	MaxTimestampEvery int
 
 	// CollectReassignments asks the controller which under-replicated partitions
-	// are moving on purpose. It costs nothing in steady state — the request is
-	// issued only when a URP is observed — so it defaults on.
+	// are moving on purpose. It is not an operator switch: the request is issued
+	// only when a URP is observed, so in a healthy cluster it costs one pass over
+	// a slice, and the only thing that clears it is the capability gate.
 	CollectReassignments bool
 
 	// CollectEpochProbes turns a committed-vs-current leader-epoch mismatch into
-	// positive proof of truncation. It issues nothing until a mismatch appears,
-	// so it defaults on.
+	// positive proof of truncation. Not an operator switch either: it issues
+	// nothing until a mismatch appears, and only the capability gate clears it.
 	CollectEpochProbes bool
-
-	// CollectRPCStats ships the counters the kgo hooks accumulate on traffic the
-	// agent already sends. Zero extra requests, so it defaults on.
-	CollectRPCStats bool
 
 	// Limits caps what one batch may contain. The zero value is unlimited.
 	Limits Limits
@@ -259,11 +257,10 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		cluster      *metrics.ClusterMetrics
 		topicDetails kadm.TopicDetails
 
-		groupIDs      []string
-		groupTypes    map[string]string
-		groupsDropped int
-		listErr       error
-		listStart     time.Time
+		groupIDs   []string
+		groupTypes map[string]string
+		listErr    error
+		listStart  time.Time
 
 		topics  []metrics.TopicMetrics
 		groups  []metrics.GroupMetrics
@@ -310,13 +307,13 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 	go func() {
 		defer close(groupsListed)
 		listStart = time.Now()
-		groupIDs, groupTypes, groupsDropped, listErr = c.listGroups(ctx)
+		groupIDs, groupTypes, listErr = c.listGroups(ctx)
 	}()
 
 	go func() {
 		defer wg.Done()
 		<-groupsListed
-		groups, groupsSec = c.collectGroups(ctx, groupIDs, groupTypes, groupsDropped, listErr, listStart)
+		groups, groupsSec = c.collectGroups(ctx, groupIDs, groupTypes, listErr, listStart)
 	}()
 
 	// Committed offsets. Must complete before either ceiling — the last stable
@@ -327,7 +324,7 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		defer close(committedDone)
 		<-metaDone
 		<-groupsListed
-		offsets, offsetsSec = c.collectOffsets(ctx, groupIDs, groupsDropped, listErr, internalTopics(topicDetails))
+		offsets, offsetsSec = c.collectOffsets(ctx, groupIDs, listErr, internalTopics(topicDetails))
 	}()
 
 	// The server-measured window. It runs in parallel with the start offsets,
@@ -423,7 +420,7 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 	// Post-pass over the finished batch: it drains an accumulator and issues no
 	// request of its own.
 	var rpcSec *section
-	batch.Agent.RPC, rpcSec = c.collectRPC(c.opts.CollectRPCStats)
+	batch.Agent.RPC, rpcSec = c.collectRPC()
 
 	// Stamped after the post-passes so collection_ms covers the whole cycle.
 	batch.CollectionMs = time.Since(start).Milliseconds()
@@ -436,7 +433,7 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		epochSec,
 		logDirsSec, reassignSec, topicCfgSec, brokerCfgSec, shareSec, rpcSec,
 	}
-	c.finalize(batch, secs, groupsDropped)
+	c.finalize(batch, secs)
 
 	c.log.Debug("collected batch",
 		"duration_ms", batch.CollectionMs,
@@ -463,13 +460,10 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 // errors.go — because that is the order errors and sections are emitted in.
 // Every one is present on every cycle, skipped or not: a missing section and an
 // empty one mean different things.
-func (c *Collector) finalize(batch *metrics.Batch, secs []*section, groupsDropped int) {
+func (c *Collector) finalize(batch *metrics.Batch, secs []*section) {
 	batch.Errors, _ = mergeErrors(secs, c.limits.MaxErrors)
 
-	// Counted once, here: MaxGroups is enforced once in listGroups and shortens
-	// the groups and offsets sections by the same set, so counting it per
-	// section would double it.
-	trunc := metrics.Truncation{Groups: groupsDropped}
+	var trunc metrics.Truncation
 	for _, s := range secs {
 		batch.Sections = append(batch.Sections, s.finish())
 		if s != nil {
@@ -480,9 +474,7 @@ func (c *Collector) finalize(batch *metrics.Batch, secs []*section, groupsDroppe
 	if trunc != (metrics.Truncation{}) {
 		batch.Truncation = &trunc
 	}
-	if c.limits.any() {
-		batch.Limits = c.limits.wire()
-	}
+	batch.Selection = c.opts.selection()
 }
 
 // Phase offsets, so the cadenced phases never sample on the same cycle.

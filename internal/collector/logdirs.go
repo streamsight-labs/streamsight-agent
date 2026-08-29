@@ -48,8 +48,7 @@ func (c *Collector) collectLogDirs(ctx context.Context, cluster *metrics.Cluster
 		return nil, sec
 	}
 
-	set, truncated := c.logDirTopics(tds)
-	sec.truncated = truncated
+	set := c.logDirTopics(tds)
 	if len(set) == 0 {
 		// MANDATORY guard, and the inverse of the bug it looks like. An empty set
 		// leaves the topics array nil, kmsg encodes a nil array as NULL, and the
@@ -328,26 +327,18 @@ func kadmLogDirs(described kadm.DescribedAllLogDirs) logDirReport {
 //
 // It reuses selectTopics with the same inputs as the topics phase, so log_dirs
 // describes exactly the topics in topics[]; otherwise a backend joining bytes
-// onto partition inventory gets rows with no join partner. Unlike List*Offsets,
-// the partition cap genuinely reduces broker work here, because the partitions
-// are named on the wire.
-//
-// Drops are a truncation FLAG only, never counts: the topics phase already
-// counts the same entities into the batch total.
-func (c *Collector) logDirTopics(tds kadm.TopicDetails) (set kadm.TopicsSet, truncated bool) {
-	selected, droppedTopics := selectTopics(tds, c.topics, c.opts.IncludeInternalTopics, c.limits.MaxTopics)
-	truncated = droppedTopics > 0
-	for _, td := range selected {
-		parts := td.Partitions.Sorted()
-		keep, dropped := capLen(len(parts), c.limits.MaxPartitionsPerTopic)
-		if dropped > 0 {
-			truncated = true
-		}
-		for _, p := range parts[:keep] {
+// onto partition inventory gets rows with no join partner. The filter is what
+// bounds this request, and it bounds it on the wire: unlike List*Offsets, which
+// take topic names and make the broker compute every partition regardless, the
+// log-dir request names each partition.
+func (c *Collector) logDirTopics(tds kadm.TopicDetails) kadm.TopicsSet {
+	var set kadm.TopicsSet
+	for _, td := range selectTopics(tds, c.topics, c.opts.IncludeInternalTopics) {
+		for _, p := range td.Partitions.Sorted() {
 			set.Add(td.Topic, p.Partition)
 		}
 	}
-	return set, truncated
+	return set
 }
 
 // buildLogDirs shapes the described directories and records their failures.

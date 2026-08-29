@@ -106,9 +106,10 @@ func TestApplyConsumerGroupDoesNotClobberClassicData(t *testing.T) {
 	}
 }
 
-// Members MaxMembersPerGroup cut must not reappear through the overlay, or the
-// two describes would disagree about which members exist.
-func TestApplyConsumerGroupRespectsMemberTruncation(t *testing.T) {
+// The classic describe decides which members exist. A member it did not return
+// must not reappear through the KIP-848 overlay, or the two describes would
+// disagree about the membership of the same group.
+func TestApplyConsumerGroupRespectsTheClassicMemberList(t *testing.T) {
 	gm := metrics.GroupMetrics{
 		ID:          "orders",
 		MemberCount: 3, // pre-truncation count
@@ -125,10 +126,10 @@ func TestApplyConsumerGroupRespectsMemberTruncation(t *testing.T) {
 	})
 
 	if len(gm.Members) != 1 {
-		t.Fatalf("members = %d, want the truncated 1", len(gm.Members))
+		t.Fatalf("members = %d, want the classic describe's 1", len(gm.Members))
 	}
 	if gm.MemberCount != 3 {
-		t.Errorf("MemberCount = %d, want the pre-truncation 3", gm.MemberCount)
+		t.Errorf("MemberCount = %d, want the count it was built with, 3", gm.MemberCount)
 	}
 }
 

@@ -29,7 +29,6 @@ var allKeys = []string{
 	"EXPORT_MAX_RETRIES",
 	"EXPORT_BASE_DELAY",
 	"EXPORT_TIMEOUT",
-	"EXPORT_GZIP",
 	"COLLECTION_INTERVAL",
 	"COLLECTION_TIMEOUT",
 	"INCLUDE_INTERNAL_TOPICS",
@@ -51,18 +50,9 @@ var allKeys = []string{
 	"COLLECT_MAX_TIMESTAMP",
 	"MAX_TIMESTAMP_EVERY",
 	"COLLECT_TIERED_OFFSETS",
-	"COLLECT_LATEST_TIERED",
 	"COLLECT_SHARE_GROUPS",
-	"COLLECT_REASSIGNMENTS",
-	"COLLECT_EPOCH_PROBES",
-	"COLLECT_RPC_STATS",
 	"MAX_ERRORS",
 	"MAX_ERROR_SAMPLES",
-	"MAX_TOPICS",
-	"MAX_PARTITIONS_PER_TOPIC",
-	"MAX_GROUPS",
-	"MAX_MEMBERS_PER_GROUP",
-	"MAX_OFFSETS_PER_GROUP",
 	"LOG_LEVEL",
 	"AGENT_INSTANCE_ID",
 }
@@ -451,7 +441,7 @@ func TestLoadScalarParsing(t *testing.T) {
 		wantErr string
 	}{
 		{name: "bad int", env: base(map[string]string{"EXPORT_QUEUE_SIZE": "lots"}), wantErr: "EXPORT_QUEUE_SIZE"},
-		{name: "bad bool", env: base(map[string]string{"EXPORT_GZIP": "yes-please"}), wantErr: "EXPORT_GZIP"},
+		{name: "bad bool", env: base(map[string]string{"KAFKA_TLS_ENABLED": "yes-please"}), wantErr: "KAFKA_TLS_ENABLED"},
 		{name: "bad duration", env: base(map[string]string{"EXPORT_TIMEOUT": "ten"}), wantErr: "EXPORT_TIMEOUT"},
 		{name: "non positive queue", env: base(map[string]string{"EXPORT_QUEUE_SIZE": "0"}), wantErr: "EXPORT_QUEUE_SIZE must be > 0"},
 		{name: "negative retries", env: base(map[string]string{"EXPORT_MAX_RETRIES": "-1"}), wantErr: "EXPORT_MAX_RETRIES must be >= 0"},
@@ -494,7 +484,6 @@ func TestLoadDefaults(t *testing.T) {
 		{"ExportMaxRetries", cfg.ExportMaxRetries, DefaultExportMaxRetries},
 		{"ExportBaseDelay", cfg.ExportBaseDelay, DefaultExportBaseDelay},
 		{"ExportTimeout", cfg.ExportTimeout, DefaultExportTimeout},
-		{"ExportGzip", cfg.ExportGzip, DefaultExportGzip},
 		{"IncludeInternalTopics", cfg.IncludeInternalTopics, false},
 		{"CollectLastStableOffset", cfg.CollectLastStableOffset, DefaultCollectLSO},
 		{"CollectConsumerGroups", cfg.CollectConsumerGroups, DefaultCollectConsumerGroups},
@@ -508,19 +497,10 @@ func TestLoadDefaults(t *testing.T) {
 		{"CollectMaxTimestamp", cfg.CollectMaxTimestamp, DefaultCollectMaxTimestamp},
 		{"MaxTimestampEvery", cfg.MaxTimestampEvery, DefaultMaxTimestampEvery},
 		{"CollectTieredOffsets", cfg.CollectTieredOffsets, DefaultCollectTieredOffsets},
-		{"CollectLatestTiered", cfg.CollectLatestTiered, DefaultCollectLatestTiered},
 		{"CollectShareGroups", cfg.CollectShareGroups, DefaultCollectShareGroups},
-		{"CollectReassignments", cfg.CollectReassignments, DefaultCollectReassignments},
-		{"CollectEpochProbes", cfg.CollectEpochProbes, DefaultCollectEpochProbes},
-		{"CollectRPCStats", cfg.CollectRPCStats, DefaultCollectRPCStats},
 		{"MaxErrors", cfg.MaxErrors, DefaultMaxErrors},
 		{"MaxErrorSamples", cfg.MaxErrorSamples, DefaultMaxErrorSamples},
 		// 0 = unlimited; see DefaultMaxEntities.
-		{"MaxTopics", cfg.MaxTopics, 0},
-		{"MaxPartitionsPerTopic", cfg.MaxPartitionsPerTopic, 0},
-		{"MaxGroups", cfg.MaxGroups, 0},
-		{"MaxMembersPerGroup", cfg.MaxMembersPerGroup, 0},
-		{"MaxOffsetsPerGroup", cfg.MaxOffsetsPerGroup, 0},
 		{"LogLevel", cfg.LogLevel, "info"},
 		{"ExportTarget", cfg.ExportTarget(), DefaultExportFile},
 	}
@@ -684,16 +664,10 @@ func TestLoadCapValidation(t *testing.T) {
 		wantErr string
 	}{
 		{name: "negative errors", env: base(map[string]string{"MAX_ERRORS": "-1"}), wantErr: "MAX_ERRORS must be >= 0"},
-		{name: "negative topics", env: base(map[string]string{"MAX_TOPICS": "-1"}), wantErr: "MAX_TOPICS must be >= 0"},
-		{name: "negative partitions", env: base(map[string]string{"MAX_PARTITIONS_PER_TOPIC": "-1"}), wantErr: "MAX_PARTITIONS_PER_TOPIC must be >= 0"},
-		{name: "negative groups", env: base(map[string]string{"MAX_GROUPS": "-1"}), wantErr: "MAX_GROUPS must be >= 0"},
-		{name: "negative members", env: base(map[string]string{"MAX_MEMBERS_PER_GROUP": "-1"}), wantErr: "MAX_MEMBERS_PER_GROUP must be >= 0"},
-		{name: "negative offsets", env: base(map[string]string{"MAX_OFFSETS_PER_GROUP": "-1"}), wantErr: "MAX_OFFSETS_PER_GROUP must be >= 0"},
-		{name: "bad integer", env: base(map[string]string{"MAX_GROUPS": "many"}), wantErr: "MAX_GROUPS"},
+		{name: "bad integer", env: base(map[string]string{"MAX_ERRORS": "many"}), wantErr: "MAX_ERRORS"},
 		{name: "zero samples", env: base(map[string]string{"MAX_ERROR_SAMPLES": "0"}), wantErr: "MAX_ERROR_SAMPLES must be >= 1"},
 		{name: "negative samples", env: base(map[string]string{"MAX_ERROR_SAMPLES": "-1"}), wantErr: "MAX_ERROR_SAMPLES must be >= 1"},
 		{name: "zero errors means unlimited", env: base(map[string]string{"MAX_ERRORS": "0"})},
-		{name: "zero entity caps mean unlimited", env: base(map[string]string{"MAX_TOPICS": "0", "MAX_GROUPS": "0"})},
 		{name: "one sample is legal", env: base(map[string]string{"MAX_ERROR_SAMPLES": "1"})},
 	}
 
@@ -714,16 +688,14 @@ func TestLoadCapValidation(t *testing.T) {
 
 func TestLoadReportsEveryCapProblemAtOnce(t *testing.T) {
 	setEnv(t, base(map[string]string{
-		"MAX_ERRORS":            "-1",
-		"MAX_ERROR_SAMPLES":     "0",
-		"MAX_TOPICS":            "-2",
-		"MAX_OFFSETS_PER_GROUP": "-3",
+		"MAX_ERRORS":        "-1",
+		"MAX_ERROR_SAMPLES": "0",
 	}))
 	_, err := Load()
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	for _, want := range []string{"MAX_ERRORS", "MAX_ERROR_SAMPLES", "MAX_TOPICS", "MAX_OFFSETS_PER_GROUP"} {
+	for _, want := range []string{"MAX_ERRORS", "MAX_ERROR_SAMPLES"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing %q: %v", want, err)
 		}
@@ -764,9 +736,6 @@ func TestLoadOptionalCollectors(t *testing.T) {
 			"COLLECT_THROUGHPUT_WINDOW": "true",
 			"THROUGHPUT_WINDOW":         "10m",
 			"THROUGHPUT_WINDOW_EVERY":   "4",
-			"COLLECT_REASSIGNMENTS":     "false",
-			"COLLECT_EPOCH_PROBES":      "false",
-			"COLLECT_RPC_STATS":         "false",
 		}))
 		cfg, err := Load()
 		if err != nil {
@@ -774,9 +743,6 @@ func TestLoadOptionalCollectors(t *testing.T) {
 		}
 		if !cfg.CollectThroughputWindow || cfg.ThroughputWindow != 10*time.Minute || cfg.ThroughputWindowEvery != 4 {
 			t.Errorf("throughput window = %t/%s/%d", cfg.CollectThroughputWindow, cfg.ThroughputWindow, cfg.ThroughputWindowEvery)
-		}
-		if cfg.CollectReassignments || cfg.CollectEpochProbes || cfg.CollectRPCStats {
-			t.Errorf("triggered phases = %t/%t/%t", cfg.CollectReassignments, cfg.CollectEpochProbes, cfg.CollectRPCStats)
 		}
 	})
 
@@ -868,8 +834,6 @@ func TestRedactedShowsTheCadenceOnlyWhenItApplies(t *testing.T) {
 		"collect_tiered_offsets=false",
 		"collect_share_groups=false",
 		"collect_configs=true",
-		"collect_reassignments=true", "collect_epoch_probes=true",
-		"collect_rpc_stats=true",
 		// On by default, so its cadence IS in force and must be printed.
 		fmt.Sprintf("configs_every=%d", DefaultConfigsEvery),
 	} {
@@ -883,13 +847,6 @@ func TestRedactedShowsTheCadenceOnlyWhenItApplies(t *testing.T) {
 			t.Errorf("redacted output prints %q for a disabled phase: %s", unwanted, s)
 		}
 	}
-	// CollectLatestTiered is subordinate: it defaults ON but is ignored while
-	// the tiered phase is off, so printing it at the defaults would advertise a
-	// setting with no effect.
-	if strings.Contains(s, "collect_latest_tiered=") {
-		t.Errorf("redacted output prints the subordinate tiered switch while its parent is off: %s", s)
-	}
-
 	// The other direction: enabling a phase brings its cadence into the line,
 	// and disabling one that defaults on takes it back out.
 	setEnv(t, base(map[string]string{"COLLECT_THROUGHPUT_WINDOW": "true"}))
@@ -924,8 +881,8 @@ func TestRedactedShowsTheCadenceOnlyWhenItApplies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !strings.Contains(cfg.Redacted(), "collect_latest_tiered=true") {
-		t.Errorf("redacted output missing the subordinate switch once its parent is on: %s", cfg.Redacted())
+	if !strings.Contains(cfg.Redacted(), "collect_tiered_offsets=true") {
+		t.Errorf("redacted output missing the phase in force: %s", cfg.Redacted())
 	}
 }
 
@@ -989,20 +946,6 @@ func snakeCase(s string) string {
 }
 
 func TestCapWarnings(t *testing.T) {
-	t.Run("entity caps warn once each and MAX_GROUPS names the offsets section", func(t *testing.T) {
-		setEnv(t, base(map[string]string{"MAX_TOPICS": "100", "MAX_GROUPS": "50"}))
-		cfg, err := Load()
-		if err != nil {
-			t.Fatalf("Load: %v", err)
-		}
-		w := strings.Join(cfg.Warnings(), "\n")
-		for _, want := range []string{"MAX_TOPICS=100", "MAX_GROUPS=50", "MAX_GROUPS also truncates the offsets section"} {
-			if !strings.Contains(w, want) {
-				t.Errorf("warnings missing %q: %s", want, w)
-			}
-		}
-	})
-
 	t.Run("unbounded errors warn", func(t *testing.T) {
 		setEnv(t, base(map[string]string{"MAX_ERRORS": "0"}))
 		cfg, err := Load()
@@ -1037,18 +980,22 @@ func TestCapWarnings(t *testing.T) {
 	})
 }
 
-func TestRedactedShowsOnlySetCaps(t *testing.T) {
-	setEnv(t, base(map[string]string{"MAX_GROUPS": "50"}))
+func TestRedactedShowsTheErrorCaps(t *testing.T) {
+	setEnv(t, base(nil))
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	s := cfg.Redacted()
-	if !strings.Contains(s, "max_errors=1000") || !strings.Contains(s, "max_groups=50") {
+	if !strings.Contains(s, "max_errors=1000") || !strings.Contains(s, "max_error_samples=1") {
 		t.Errorf("redacted output missing the caps in force: %s", s)
 	}
-	if strings.Contains(s, "max_topics=") {
-		t.Errorf("redacted output prints an unlimited cap: %s", s)
+	// The entity caps are gone: no setting shortens the inventory, so no key
+	// here may suggest one does.
+	for _, gone := range []string{"max_topics=", "max_partitions_per_topic=", "max_groups=", "max_offsets_per_group="} {
+		if strings.Contains(s, gone) {
+			t.Errorf("redacted output prints %q, but no such cap exists: %s", gone, s)
+		}
 	}
 }
 

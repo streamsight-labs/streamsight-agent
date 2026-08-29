@@ -207,7 +207,9 @@ parseable.
   application/json`.
 * Headers: `X-API-Key`, and `Idempotency-Key: <agent_instance_id>-<batch_seq>` so a
   delivered-but-unacknowledged batch can be deduplicated by the receiver.
-* `EXPORT_GZIP` (default on) compresses the body and sets `Content-Encoding: gzip`.
+* Every body is gzipped and sent with `Content-Encoding: gzip`. This is not configurable:
+  the payload is repetitive JSON that compresses 85-90%, so the only thing a switch ever
+  bought was a larger bill on both ends.
 * Retries: `408`, `429` and every `5xx` are retried up to `EXPORT_MAX_RETRIES` with
   full-jitter backoff (uniform in `[0, EXPORT_BASE_DELAY << (n-1)]`, capped at 30s). A
   `Retry-After` header overrides that delay, clamped to 5 minutes. Every other `4xx` is
@@ -254,7 +256,6 @@ configuration problems at once and exits non-zero — one restart per fix, not f
 | `EXPORT_MAX_RETRIES` | `3` | http mode | Must be >= 0. `0` is honoured as "never retry", not treated as unset. |
 | `EXPORT_BASE_DELAY` | `1s` | http mode | Must be > 0. Backoff base. |
 | `EXPORT_TIMEOUT` | `10s` | http mode | Must be > 0. Per-request deadline. |
-| `EXPORT_GZIP` | `true` | http mode | |
 
 ### Collection
 
@@ -270,24 +271,29 @@ configuration problems at once and exits non-zero — one restart per fix, not f
 | `GROUP_STATES` | `""` (all) | Comma-separated states the broker should list: `Unknown`, `PreparingRebalance`, `CompletingRebalance`, `Stable`, `Dead`, `Empty`. Case-insensitive; an unrecognised state fails startup. Filtered **broker-side**, so it shortens both `groups[]` and `offsets[]` and reports no truncation. **Requires Kafka 2.6+** (ListGroups v4, KIP-518): an older broker drops the filter on the wire and returns every group with no error, so startup probes `ApiVersions` on every broker and refuses to run if any is older. |
 | `COLLECT_LAST_STABLE_OFFSET` | `true` | Adds `partitions[].last_stable_offset` via `ListCommittedOffsets`, sampled between the committed offsets and the high watermarks. Leave it on: without it every `read_committed` consumer on a transactional topic reports permanent false lag. No new ACL; one extra `ListOffsets` fan-out per cycle. |
 | `COLLECT_CONSUMER_GROUPS` | `true` | Adds the KIP-848 fields — `groups[].group_epoch`, `assignment_epoch`, `assignor`, per-member `member_epoch` / `target_assignment` — via `ConsumerGroupDescribe`. It is the only way to see a new-protocol group at all: the classic describe returns one with empty join metadata and **no error**. Needs Kafka 4.0+; startup probes `ApiVersions` and disables it with a log line on an older cluster, so the cost there is one round trip, not a rejected request per cycle. No new ACL. |
-| `COLLECT_LOG_DIRS` | `true` | Adds the `log_dirs[]` section (per-broker, per-directory replica bytes and offline-disk detection) via `DescribeLogDirs`. On by default because it is the only source of per-replica disk bytes, and every storage question the product answers rests on it: days-to-full, per-topic chargeback, follower lag in bytes without JMX, JBOD imbalance, and the average record size that converts every record rate into a byte rate. No ACL beyond the `DESCRIBE` on `CLUSTER` already required, but the response is O(replicas) = partitions × replication factor, the largest payload the agent emits — which is what `LOG_DIRS_EVERY` is for. Size `MAX_TOPICS`/`MAX_PARTITIONS_PER_TOPIC` before running it at `LOG_DIRS_EVERY=1` on a large cluster. |
+| `COLLECT_LOG_DIRS` | `true` | Adds the `log_dirs[]` section (per-broker, per-directory replica bytes and offline-disk detection) via `DescribeLogDirs`. On by default because it is the only source of per-replica disk bytes, and every storage question the product answers rests on it: days-to-full, per-topic chargeback, follower lag in bytes without JMX, JBOD imbalance, and the average record size that converts every record rate into a byte rate. No ACL beyond the `DESCRIBE` on `CLUSTER` already required, but the response is O(replicas) = partitions × replication factor, the largest payload the agent emits — which is what `LOG_DIRS_EVERY` is for. On a large cluster, narrow `TOPIC_INCLUDE_REGEX`/`TOPIC_EXCLUDE_REGEX` before running it at `LOG_DIRS_EVERY=1` — the log-dir request names every partition on the wire, so the filter shrinks the request itself. |
 | `LOG_DIRS_EVERY` | `24` | Run the log-dirs phase every Nth cycle — two minutes at the default interval, because disks fill over hours. Must be >= 1 (`1` = every cycle); `0` is an error, not "every cycle". Ignored when `COLLECT_LOG_DIRS=false`. |
 | `COLLECT_THROUGHPUT_WINDOW` | `false` | Adds `throughput_window` and `partitions[].window` via `ListOffsetsAfterMilli`: the produce rate measured **by the broker**, and the only rate input in the batch that survives an agent restart or a missed cycle. Off by default because it adds a `ListOffsets` fan-out — two on a mostly-silent cluster — to every cycle it runs on. Needs ListOffsets v1 (Kafka 0.10.1+); startup disables it below that, where the broker answers with no timestamp at all and no error. No new ACL. |
 | `THROUGHPUT_WINDOW` | `5m` | How far back the window reaches. It earns its cost only when it is **wider than `COLLECTION_INTERVAL`**: inside one interval a backend can already difference two batches. Must be > 0. |
 | `THROUGHPUT_WINDOW_EVERY` | `1` | Run the window phase every Nth cycle. Must be >= 1. |
 | `COLLECT_MAX_TIMESTAMP` | `true` | Adds `partitions[].max_timestamp` — the newest record's timestamp and the offset carrying it — via `ListOffsets` at timestamp `-3` (KIP-734). **No new ACL**: same API key as the four offset phases, and the broker authorizes before it reads the timestamp field. It replaces an inference with a measurement: topic liveness is otherwise guessed from a run of zero end-offset deltas, which cannot tell a silent topic from a missed cycle. One extra `ListOffsets` fan-out; measured 4 ms on a 3-broker cluster. Needs Kafka 3.0+ (ListOffsets v7); below that the broker reads `-3` as a real millisecond and answers with an arbitrary offset **and no error**, which is why startup disables it rather than trusting the value. A partition with no max timestamp answers `-1` and ships `null`. |
-| `COLLECT_TIERED_OFFSETS` | `false` | Adds `partitions[].tiered.local_start_offset` via `ListOffsets` at `-4` (KIP-405): the earliest offset actually on the broker's **disk**, as opposed to `start_offset`, which on a tiered cluster is the global earliest including remote storage. A consumer reading between the two still succeeds and fetches from object storage at object-storage latency — a state nothing else in the batch distinguishes from healthy. Off by default because on a cluster without remote storage it returns the same answer as `start_offset` for the price of a round trip. Needs Kafka 3.4+ (ListOffsets v8). No new ACL. |
-| `COLLECT_LATEST_TIERED` | `true` | Additionally asks for `tiered.remote_end_offset` at `-5` (KIP-1005) — how far the archival tier is behind. **Ignored unless `COLLECT_TIERED_OFFSETS` is also set.** Gated apart from the local start because KIP-1005 landed five releases after KIP-405, so a 3.4–3.8 cluster serves one and not the other; one null inside a present `tiered` object is a real state, not an error. Needs Kafka 3.9+ (ListOffsets v9). No new ACL. |
+| `COLLECT_TIERED_OFFSETS` | `false` | Adds `partitions[].tiered.local_start_offset` via `ListOffsets` at `-4` (KIP-405): the earliest offset actually on the broker's **disk**, as opposed to `start_offset`, which on a tiered cluster is the global earliest including remote storage. A consumer reading between the two still succeeds and fetches from object storage at object-storage latency — a state nothing else in the batch distinguishes from healthy. Off by default because on a cluster without remote storage it returns the same answer as `start_offset` for the price of a round trip. Turning it on also asks for `tiered.remote_end_offset` at `-5` (KIP-1005) — how far the archival tier is behind — with no second switch: on a 3.4–3.8 cluster the startup probe drops that half and one null inside a present `tiered` object is a real state, not an error. Needs Kafka 3.4+ (ListOffsets v8), 3.9+ (v9) for the remote end. No new ACL. |
 | `COLLECT_SHARE_GROUPS` | `false` | Adds the `share_groups[]` section via `ShareGroupDescribe` + `DescribeShareGroupOffsets` (KIP-932). Share groups are **not** consumer groups under another name: members share partitions and acknowledge individual records, so there is no committed offset per partition, no assignment to diff, and no lag in the committed-versus-end sense. They ship in their own section so no consumer-group derivation runs silently against a shape it does not model. Needs Kafka 4.0+. **Never exercised against a broker that can answer.** |
 | `COLLECT_CONFIGS` | `true` | Adds `topic_configs[]` and `broker_configs[]` via `DescribeConfigs`, over a fixed allowlist (10 topic keys, 11 broker keys). **The only collector that needs an ACL outside the three DESCRIBE grants** — `DESCRIBE_CONFIGS` on `TOPIC` and on `CLUSTER` — and it defaults **on** anyway, because what it collects is a correction rather than a feature. Without the grant these two sections report `unauthorized` and nothing else degrades; set `COLLECT_CONFIGS=false` to stop asking. `cleanup.policy` marks the compacted topics, where offset deltas are not record counts and consumer lag is overstated by an unknowable amount — without it the product reports a confident wrong number. `min.insync.replicas` separates "redundancy is reduced" from "every `acks=all` produce is failing right now", which the URP gauge alone cannot do. `offsets.retention.minutes` turns consumer overrun from a post-mortem into a prediction. Measured cost: **+517 B gzipped on the cycles it runs**, 8 B/batch amortised at the default cadence. Needs Kafka 1.1+ (DescribeConfigs v1, the version that carries `ConfigSource`); startup disables it below that rather than shipping every key as an indistinguishable default. |
 | `MAX_TIMESTAMP_EVERY` | `12` | Run the max-timestamp phase every Nth cycle — once a minute at the default interval. Must be >= 1. Cadenced for two independent reasons. **Broker cost**: `-3` is the only offset sentinel that is not O(1). `-1` and `-2` read `logEndOffset`/`logStartOffset`, numbers already in memory; `-3` makes the broker walk every local log segment comparing cached `maxTimestampSoFar`, then on Kafka 3.8+ do an index lookup and scan the winning batch. **Payload**: `partitions[].max_timestamp` is the largest single field the agent adds — measured 77.7 B/partition raw and **18.9% of the gzipped batch**, and gzip cannot fold it because each value is a distinct wide integer. The question it answers — "when was the last record written" — has a minutes-scale answer, so a 60s-stale figure costs nothing real. |
 | `CONFIGS_EVERY` | `360` | Run the config phases every Nth cycle. The slowest cadence in the agent: configs change when a human changes them. Must be >= 1. |
-| `COLLECT_REASSIGNMENTS` | `true` | Adds `reassignments[]` via `ListPartitionReassignments` — "is this URP a failure or a planned move", the largest false-positive source in URP alerting. **The request is issued only when an under-replicated partition is observed**, so in a healthy cluster it costs one pass over a slice and the section reports `skipped`. Needs Kafka 2.4+. No new ACL. |
-| `COLLECT_EPOCH_PROBES` | `true` | Adds `epoch_probes[]` via `OffsetForLeaderEpoch`: positive proof of truncation (`committed_offset > end_offset` at the committed epoch), as opposed to the "high watermark went backwards" heuristic. **Fires only when a group's committed leader epoch disagrees with the partition's current one**, so it issues nothing in steady state. Needs Kafka 0.11+. No new ACL. |
-| `COLLECT_RPC_STATS` | `true` | Adds `agent.rpc` — per-broker latency histograms, bytes, connect failures and quota throttling, measured by hooks on the requests the agent already sends. Zero extra requests, zero ACL. Counters are per-window deltas reset every cycle: divide by `window_ms`, never by `COLLECTION_INTERVAL`. |
 
 Regexes are **unanchored**: `orders` also matches `prod.orders`. Write `^orders$` for
 an exact match. Group IDs beginning with `__` are always skipped.
+
+Three collectors have no variable at all, because there is no cost to trade away and an
+off position only ever bought a blind spot. `reassignments[]` issues
+`ListPartitionReassignments` only on a cycle that already saw an under-replicated
+partition; `epoch_probes[]` issues `OffsetForLeaderEpoch` only when a committed leader
+epoch disagrees with the partition's current one, once per distinct question per process;
+and `agent.rpc` is read off hooks on requests the agent was sending anyway — no request,
+no ACL, no broker work. Each is still switched off automatically on a cluster too old to
+serve it, which is a capability probe's job rather than an operator's.
 
 **Removed after v0.2.0:** `COLLECT_GROUP_STATES`, `GROUP_STATE_POLL_INTERVAL` and
 `MAX_TRANSITIONS_PER_GROUP`. The fast group-state poll was measured against a real rebalance
@@ -314,14 +320,18 @@ ceiling. Setting any of them logs a startup warning.
 |----------|---------|-------|
 | `MAX_ERRORS` | `1000` | Maximum entries in `errors[]` per batch; `0` = unlimited (and logs a warning). Behind deduplication this is a backstop that essentially never fires. When the cap bites, entries are admitted in priority order — whole-request and authorization failures survive ahead of the per-partition flood. |
 | `MAX_ERROR_SAMPLES` | `1` | Verbatim occurrences emitted per distinct failure mode before the rest are folded into the exemplar's `count`. Must be >= 1. |
-| `MAX_TOPICS` | `0` (unlimited) | Maximum topics per batch. Also shrinks the request fan-out: it caps the topic list sent to `ListStartOffsets`/`ListCommittedOffsets`/`ListEndOffsets` and the topic+partition set sent to `DescribeLogDirs`. |
-| `MAX_PARTITIONS_PER_TOPIC` | `0` (unlimited) | Maximum partitions emitted per topic. Payload cap only for the offset listings — kadm's `List*Offsets` take topic names, so the broker computes every partition regardless — but it does shrink the `DescribeLogDirs` request, whose partitions are named on the wire. |
-| `MAX_GROUPS` | `0` (unlimited) | Maximum consumer groups per batch. Enforced once, on the shared `ListGroups` result, so it shrinks the `DescribeGroups` and `OffsetFetch` fan-out **and truncates the `offsets` section as well as `groups`**. |
-| `MAX_MEMBERS_PER_GROUP` | `0` (unlimited) | Maximum members emitted per group. `groups[].generation` is derived from the members that were emitted, so a truncated group can under-report it. |
-| `MAX_OFFSETS_PER_GROUP` | `0` (unlimited) | Maximum committed offsets emitted per group. |
 
-No cap adds an ACL requirement, and none adds a request. `MAX_TOPICS` and `MAX_GROUPS`
-strictly *reduce* what is asked for; the rest only trim the payload.
+**Nothing caps the inventory.** There is no `MAX_TOPICS`, no `MAX_GROUPS`, no per-parent
+entity cap of any kind, and that is deliberate: a batch either describes everything it was
+pointed at or a section says why it could not, with no third state where the payload
+quietly describes part of a cluster as though it were the whole one. A cap could only ever
+keep an arbitrary prefix of a sorted list — which 100 of your 5000 topics? the first 100
+alphabetically, and a different 100 next week — so it answers a question nobody asks in
+those terms.
+
+What a deployment does not want to watch is said in the filters above, which is a decision
+written down rather than a dice roll, shrinks the same broker requests a cap would have,
+and travels with the data in `selection` so the far end knows what it is looking at.
 
 ### Kafka authentication
 
@@ -586,22 +596,25 @@ occurrence only — the full affected set is still recoverable from the per-enti
 blast radius from `len(errors)` will under-count.** `sections[].error_count` is how many
 entries in `errors[]` bear that section's name — also not an occurrence count.
 
-**6. The presence of `truncation` means the batch is incomplete.**
-Its absence means complete. It is readable at three levels:
+**6. `truncation` is about `errors[]`, and `selection` is about coverage.**
+They answer two different questions, and neither is a status downgrade — `status` is
+collection health.
 
-* **batch** — `truncation.{topics,partitions,groups,members,offsets,errors_collapsed,errors_dropped}`:
-  can a cluster-wide aggregate be computed from this batch at all?
-* **section** — `sections[].truncated`, `sections[].errors_collapsed`,
-  `sections[].errors_dropped`: which phase is short?
-* **entity** — `topics[].partition_count`, `groups[].member_count` and
-  `offsets[].offset_count` are always the **true, pre-truncation** counts, so
-  `len(list) < count` is self-describing.
+`truncation` is present only when `errors[]` is short: `errors_collapsed` counts
+occurrences folded into an exemplar's `count` (nothing is lost), `errors_dropped` counts
+entries `MAX_ERRORS` refused outright (those are lost). `sections[].truncated` says which
+phase is affected, and is also raised by the agent's own internal fan-out bounds — the
+epoch-probe cap, the 1000-partition reassignment query — which are constants, not settings.
 
-`errors_collapsed` counts occurrences folded into an exemplar's `count` — nothing is lost.
-`errors_dropped` counts entries a cap refused outright — those are lost. `limits` echoes
-the caps in force, so "the cluster has 40 topics" is distinguishable from "the agent was
-told to ship 40"; it is absent when every entity cap is unlimited. Truncation is **not** a
-status downgrade: `status` is collection health, `truncated` is emission policy.
+Entity lists are never short. `topics[].partition_count`, `groups[].member_count` and
+`offsets[].offset_count` always equal `len(list)`; a mismatch is a sender bug and the mock
+ingest fails it as one.
+
+`selection` answers "is this the whole cluster?" It echoes the filters in force —
+`topic_include`, `topic_exclude`, `group_include`, `group_exclude`, `group_states`,
+`include_internal_topics` — and is **absent when nothing is filtered**, which is the only
+positive signal that the batch covers everything. Filtering leaves no other trace: an
+excluded topic is simply not there, with no counter anywhere saying it existed.
 
 ### Log directories
 
@@ -672,10 +685,12 @@ exporter, so `batches_exported` is always at least one behind `batches_collected
   by the capability probe, so the field is `null` and `topics_lso` is `skipped` rather than
   silently carrying the high watermark. The failure mode only returns if the probe itself
   failed, which is logged loudly.
-* `broker_rpc` histograms are per broker per API key with no cap of their own. The share has
-  been measured on a 3-broker cluster at 4% of the batch, but nothing bounds it structurally,
-  and it grows with `brokers × API keys`, so on a large fleet check batch bytes before leaving
-  `COLLECT_RPC_STATS` on.
+* `broker_rpc` histograms are per broker per API key with no cap of their own — measured at
+  4% of the batch on a 3-broker cluster. It grows with `brokers × API keys` while everything
+  around it grows with partitions, so its share is largest exactly where the batch is
+  smallest (on a one-broker dev cluster it was the biggest block in a 2 KB batch) and
+  shrinks as the cluster gets big enough for the number to matter. There is no switch for
+  it: an agent that cannot report its own request latency cannot be supported.
 
 ## Security
 

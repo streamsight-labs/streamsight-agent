@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"kafka-metrics-agent/internal/metrics"
 )
 
 // filter is an include+exclude regex pair. A nil *filter allows everything.
@@ -50,3 +52,27 @@ func (f *filter) allow(name string) bool {
 // explicit IsInternal flag in metadata; the group protocol carries nothing
 // equivalent, so the prefix convention is all there is.
 func isInternalGroup(id string) bool { return strings.HasPrefix(id, "__") }
+
+// selection echoes the filters in force, for the batch to carry.
+//
+// Nil when nothing narrows the view, so presence alone answers the question a
+// backend has to ask before aggregating: is this the whole cluster? A filtered
+// entity leaves no trace in the payload -- it is simply absent, with no counter
+// saying it ever existed -- so the configuration has to travel with the data or
+// the omission is unknowable at the far end.
+func (o Options) selection() *metrics.Selection {
+	sel := metrics.Selection{
+		TopicInclude:          o.TopicIncludeRegex,
+		TopicExclude:          o.TopicExcludeRegex,
+		GroupInclude:          o.GroupIncludeRegex,
+		GroupExclude:          o.GroupExcludeRegex,
+		GroupStates:           o.GroupStates,
+		IncludeInternalTopics: o.IncludeInternalTopics,
+	}
+	if sel.TopicInclude == "" && sel.TopicExclude == "" &&
+		sel.GroupInclude == "" && sel.GroupExclude == "" &&
+		len(sel.GroupStates) == 0 && !sel.IncludeInternalTopics {
+		return nil
+	}
+	return &sel
+}

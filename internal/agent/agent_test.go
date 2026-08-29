@@ -350,20 +350,11 @@ func TestCollectorOptionsCarryEveryConfiguredSetting(t *testing.T) {
 		ConfigsEvery:            11,
 		CollectMaxTimestamp:     true,
 		CollectTieredOffsets:    true,
-		CollectLatestTiered:     true,
 		CollectShareGroups:      true,
 		MaxTimestampEvery:       12,
-		CollectReassignments:    true,
-		CollectEpochProbes:      true,
-		CollectRPCStats:         true,
 
-		MaxErrors:             11,
-		MaxErrorSamples:       2,
-		MaxTopics:             3,
-		MaxPartitionsPerTopic: 4,
-		MaxGroups:             5,
-		MaxMembersPerGroup:    6,
-		MaxOffsetsPerGroup:    8,
+		MaxErrors:       11,
+		MaxErrorSamples: 2,
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	opts := collectorOptions(cfg, logger)
@@ -374,7 +365,7 @@ func TestCollectorOptionsCarryEveryConfiguredSetting(t *testing.T) {
 	if opts.Timeout != cfg.CollectionTimeout {
 		t.Errorf("Timeout = %s, want %s", opts.Timeout, cfg.CollectionTimeout)
 	}
-	if opts.Limits.MaxGroups != cfg.MaxGroups || opts.Limits.MaxErrors != cfg.MaxErrors {
+	if opts.Limits.MaxErrorSamples != cfg.MaxErrorSamples || opts.Limits.MaxErrors != cfg.MaxErrors {
 		t.Errorf("Limits = %+v", opts.Limits)
 	}
 

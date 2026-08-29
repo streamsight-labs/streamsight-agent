@@ -292,45 +292,25 @@ func TestDefectFiresItsCode(t *testing.T) {
 			b.Agent.QueueDepth = 3
 		}},
 
-		// Truncation must never be silent: a short list with no truncation
-		// block is the exact falsehood the counts were added to prevent.
-		{"silent partition truncation", "data.partition_count", func(b *metrics.Batch) {
+		// No cap shortens an entity list, so a declared count that disagrees with
+		// the list is a sender bug however the batch is decorated.
+		{"partition_count above the list", "data.partition_count", func(b *metrics.Batch) {
 			b.Topics[0].PartitionCount = 40
 		}},
-		{"silent offset truncation", "data.offset_count", func(b *metrics.Batch) {
+		{"offset_count above the list", "data.offset_count", func(b *metrics.Batch) {
 			b.Offsets[0].OffsetCount = 40
 		}},
 		{"offset_count below the list", "data.offset_count", func(b *metrics.Batch) {
 			b.Offsets[0].OffsetCount = 1
-			b.Truncation = &metrics.Truncation{Offsets: 1}
-			b.Limits = &metrics.Limits{MaxOffsetsPerGroup: 1}
 		}},
 		{"empty truncation block", "truncation.empty", func(b *metrics.Batch) {
 			b.Truncation = &metrics.Truncation{}
 		}},
-		{"truncation with no cap to explain it", "truncation.no_limits", func(b *metrics.Batch) {
-			b.Topics[0].PartitionCount = 40
-			b.Truncation = &metrics.Truncation{Partitions: 38}
-		}},
-		{"understated partition truncation", "truncation.partitions", func(b *metrics.Batch) {
-			b.Topics[0].PartitionCount = 40
-			b.Truncation = &metrics.Truncation{Partitions: 1}
-			b.Limits = &metrics.Limits{MaxPartitionsPerTopic: 2}
-		}},
-		{"section truncated with no batch block", "truncation.section_unaccounted", func(b *metrics.Batch) {
-			b.Sections[1].Truncated = true
+		{"empty selection block", "selection.empty", func(b *metrics.Batch) {
+			b.Selection = &metrics.Selection{}
 		}},
 		{"collapsed errors do not add up", "truncation.errors_collapsed", func(b *metrics.Batch) {
 			b.Truncation = &metrics.Truncation{ErrorsCollapsed: 5}
-		}},
-		{"more errors than the declared cap", "errors.cap_exceeded", func(b *metrics.Batch) {
-			b.Errors = []metrics.CollectionError{
-				{Section: "groups", Message: "a", Kind: "other"},
-				{Section: "groups", Message: "b", Kind: "other"},
-			}
-			b.Sections[3].ErrorCount = 2
-			b.Sections[3].Status = metrics.SectionPartial
-			b.Limits = &metrics.Limits{MaxErrors: 1}
 		}},
 		{"negative error count", "errors.negative_count", func(b *metrics.Batch) {
 			b.Errors = []metrics.CollectionError{{Section: "groups", Message: "a", Kind: "other", Count: -1}}
