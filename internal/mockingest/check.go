@@ -712,7 +712,6 @@ func checkData(c *checker, b *metrics.Batch) {
 	}
 
 	checkLogDirs(c, b)
-	return
 }
 
 // checkLogDirs validates the per-broker storage view. Its rows are per REPLICA,
