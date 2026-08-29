@@ -41,17 +41,22 @@ data:
   COLLECTION_TIMEOUT: {{ . | quote }}
   {{- end }}
   INCLUDE_INTERNAL_TOPICS: {{ .Values.collection.includeInternalTopics | quote }}
-  {{- with .Values.collection.topicIncludeRegex }}
-  TOPIC_INCLUDE_REGEX: {{ . | quote }}
+  # The four filter keys are comma-separated lists, quoted here as the single
+  # string the agent splits itself. An entry is matched literally unless it is
+  # wrapped in slashes -- "orders.events" matches only the topic of that name,
+  # while "/^tmp-/" is compiled as an unanchored regex. An unset key renders
+  # nothing and leaves that list empty, which matches everything.
+  {{- with .Values.collection.topicInclude }}
+  TOPIC_INCLUDE: {{ . | quote }}
   {{- end }}
-  {{- with .Values.collection.topicExcludeRegex }}
-  TOPIC_EXCLUDE_REGEX: {{ . | quote }}
+  {{- with .Values.collection.topicExclude }}
+  TOPIC_EXCLUDE: {{ . | quote }}
   {{- end }}
-  {{- with .Values.collection.groupIncludeRegex }}
-  GROUP_INCLUDE_REGEX: {{ . | quote }}
+  {{- with .Values.collection.groupInclude }}
+  GROUP_INCLUDE: {{ . | quote }}
   {{- end }}
-  {{- with .Values.collection.groupExcludeRegex }}
-  GROUP_EXCLUDE_REGEX: {{ . | quote }}
+  {{- with .Values.collection.groupExclude }}
+  GROUP_EXCLUDE: {{ . | quote }}
   {{- end }}
   {{- with .Values.collection.groupStates }}
   GROUP_STATES: {{ . | quote }}
@@ -96,9 +101,11 @@ data:
   COLLECT_SHARE_GROUPS: {{ .Values.collection.collectShareGroups | quote }}
 
   # -- Cardinality caps ---------------------------------------------------
-  # Only the caps that are set are rendered: the agent's own default for an
-  # unset entity cap is "unlimited", and emitting five "0"s would read as a
-  # deliberate choice rather than an absent one.
+  # Both are rendered unconditionally, unlike the cadence keys above. Those
+  # have a compiled-in default that an absent key must not shadow; these two
+  # have real non-zero defaults carried in values.yaml, so an operator editing
+  # the chart sees the ceiling they are actually running with rather than a
+  # blank they have to go read the Go source to resolve.
   MAX_ERRORS: {{ .Values.limits.maxErrors | int | quote }}
   MAX_ERROR_SAMPLES: {{ .Values.limits.maxErrorSamples | int | quote }}
 

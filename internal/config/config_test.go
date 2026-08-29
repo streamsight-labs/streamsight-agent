@@ -32,10 +32,10 @@ var allKeys = []string{
 	"COLLECTION_INTERVAL",
 	"COLLECTION_TIMEOUT",
 	"INCLUDE_INTERNAL_TOPICS",
-	"TOPIC_INCLUDE_REGEX",
-	"TOPIC_EXCLUDE_REGEX",
-	"GROUP_INCLUDE_REGEX",
-	"GROUP_EXCLUDE_REGEX",
+	"TOPIC_INCLUDE",
+	"TOPIC_EXCLUDE",
+	"GROUP_INCLUDE",
+	"GROUP_EXCLUDE",
 	"GROUP_STATES",
 	"EXPORT_FILE_FSYNC",
 	"COLLECT_LAST_STABLE_OFFSET",
@@ -274,18 +274,27 @@ func TestLoadIntervalValidation(t *testing.T) {
 	}
 }
 
-func TestLoadRegexValidation(t *testing.T) {
+// Only the slash-wrapped form can be malformed. A literal is escaped before it
+// is compiled, so no value an operator can type makes the process refuse to
+// start -- which is the point of literals being the default.
+func TestLoadSelectionValidation(t *testing.T) {
 	tests := []struct {
 		name    string
 		key     string
 		value   string
 		wantErr bool
 	}{
-		{name: "valid topic include", key: "TOPIC_INCLUDE_REGEX", value: "^orders\\..*"},
-		{name: "bad topic include", key: "TOPIC_INCLUDE_REGEX", value: "[", wantErr: true},
-		{name: "bad topic exclude", key: "TOPIC_EXCLUDE_REGEX", value: "a(", wantErr: true},
-		{name: "bad group include", key: "GROUP_INCLUDE_REGEX", value: "*", wantErr: true},
-		{name: "bad group exclude", key: "GROUP_EXCLUDE_REGEX", value: "(?P<", wantErr: true},
+		{name: "literal is always valid", key: "TOPIC_INCLUDE", value: "orders.events"},
+		{name: "a literal made of metacharacters is still valid", key: "TOPIC_INCLUDE", value: "a(["},
+		{name: "valid slash regex", key: "TOPIC_INCLUDE", value: "/^orders\\..*/"},
+		{name: "list mixing both forms", key: "TOPIC_INCLUDE", value: "orders.events,/^tmp-/"},
+		{name: "bad topic include regex", key: "TOPIC_INCLUDE", value: "/[/", wantErr: true},
+		{name: "bad topic exclude regex", key: "TOPIC_EXCLUDE", value: "/a(/", wantErr: true},
+		{name: "bad group include regex", key: "GROUP_INCLUDE", value: "/*/", wantErr: true},
+		{name: "bad group exclude regex", key: "GROUP_EXCLUDE", value: "/(?P</", wantErr: true},
+		{name: "one bad entry fails the whole list", key: "TOPIC_INCLUDE", value: "orders,/(unclosed/", wantErr: true},
+		{name: "empty regex body is refused", key: "TOPIC_EXCLUDE", value: "//", wantErr: true},
+		{name: "a lone slash is a literal, not an empty regex", key: "TOPIC_EXCLUDE", value: "/"},
 	}
 
 	for _, tc := range tests {
@@ -299,8 +308,55 @@ func TestLoadRegexValidation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
-			if cfg.TopicIncludeRegex != tc.value {
-				t.Fatalf("regex not preserved: %q", cfg.TopicIncludeRegex)
+			got := map[string][]string{
+				"TOPIC_INCLUDE": cfg.TopicInclude,
+				"TOPIC_EXCLUDE": cfg.TopicExclude,
+				"GROUP_INCLUDE": cfg.GroupInclude,
+				"GROUP_EXCLUDE": cfg.GroupExclude,
+			}[tc.key]
+			want := splitList(tc.value)
+			if len(got) != len(want) {
+				t.Fatalf("%s = %q, want %q", tc.key, got, want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("%s = %q, want %q", tc.key, got, want)
+				}
+			}
+		})
+	}
+}
+
+// The list is split the same way GROUP_STATES and KAFKA_BROKERS are, and is
+// kept exactly as written because every batch echoes it back.
+func TestLoadSelectionSplitting(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  []string
+	}{
+		{name: "unset means everything", value: "", want: nil},
+		{name: "single literal", value: "orders.events", want: []string{"orders.events"}},
+		{name: "surrounding space is trimmed", value: " orders , payments ", want: []string{"orders", "payments"}},
+		{name: "blank entries are dropped", value: "orders,,payments,", want: []string{"orders", "payments"}},
+		{name: "only separators means everything", value: " , , ", want: nil},
+		{name: "slashes survive the split", value: "/^a,b$/", want: []string{"/^a", "b$/"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setEnv(t, base(map[string]string{"TOPIC_INCLUDE": tc.value}))
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if len(cfg.TopicInclude) != len(tc.want) {
+				t.Fatalf("TopicInclude = %q, want %q", cfg.TopicInclude, tc.want)
+			}
+			for i := range tc.want {
+				if cfg.TopicInclude[i] != tc.want[i] {
+					t.Fatalf("TopicInclude = %q, want %q", cfg.TopicInclude, tc.want)
+				}
 			}
 		})
 	}
@@ -516,6 +572,22 @@ func TestLoadDefaults(t *testing.T) {
 	if len(cfg.GroupStates) != 0 {
 		t.Errorf("GroupStates = %v, want empty", cfg.GroupStates)
 	}
+	// Same rule for the four selection lists: unset is the whole cluster, and
+	// an empty list is what selection() reads to decide the batch carries no
+	// selection block at all.
+	for _, l := range []struct {
+		name string
+		got  []string
+	}{
+		{"TopicInclude", cfg.TopicInclude},
+		{"TopicExclude", cfg.TopicExclude},
+		{"GroupInclude", cfg.GroupInclude},
+		{"GroupExclude", cfg.GroupExclude},
+	} {
+		if len(l.got) != 0 {
+			t.Errorf("%s = %q, want empty", l.name, l.got)
+		}
+	}
 }
 
 func TestLoadLogLevel(t *testing.T) {
@@ -634,13 +706,13 @@ func TestLoadReportsEveryProblemAtOnce(t *testing.T) {
 	setEnv(t, map[string]string{
 		"COLLECTION_INTERVAL": "0s",
 		"LOG_LEVEL":           "loud",
-		"TOPIC_INCLUDE_REGEX": "[",
+		"TOPIC_INCLUDE":       "/[/",
 	})
 	_, err := Load()
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	for _, want := range []string{"KAFKA_BROKERS", "COLLECTION_INTERVAL", "LOG_LEVEL", "TOPIC_INCLUDE_REGEX"} {
+	for _, want := range []string{"KAFKA_BROKERS", "COLLECTION_INTERVAL", "LOG_LEVEL", "TOPIC_INCLUDE"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing %q: %v", want, err)
 		}

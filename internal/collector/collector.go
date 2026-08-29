@@ -24,10 +24,14 @@ type Options struct {
 	IncludeInternalTopics bool
 
 	// An empty include matches everything; exclude wins over include.
-	TopicIncludeRegex string
-	TopicExcludeRegex string
-	GroupIncludeRegex string
-	GroupExcludeRegex string
+	// The four selection lists, as configured: each entry is a literal unless
+	// wrapped in slashes, which newFilter is what knows about. They are held as
+	// written rather than pre-compiled because selection() has to echo them into
+	// the batch verbatim.
+	TopicInclude []string
+	TopicExclude []string
+	GroupInclude []string
+	GroupExclude []string
 
 	// GroupStates optionally restricts ListGroups to these states, in the
 	// broker's own capitalisation. Empty lists all groups. The broker applies it
@@ -166,11 +170,11 @@ type Collector struct {
 
 // New builds a Collector. It fails only on a malformed filter regex.
 func New(client *kafka.Client, opts Options) (*Collector, error) {
-	topics, err := newFilter(opts.TopicIncludeRegex, opts.TopicExcludeRegex)
+	topics, err := newFilter(opts.TopicInclude, opts.TopicExclude)
 	if err != nil {
 		return nil, err
 	}
-	groups, err := newFilter(opts.GroupIncludeRegex, opts.GroupExcludeRegex)
+	groups, err := newFilter(opts.GroupInclude, opts.GroupExclude)
 	if err != nil {
 		return nil, err
 	}

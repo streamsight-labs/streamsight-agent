@@ -13,11 +13,16 @@ import (
 	"kafka-metrics-agent/internal/metrics"
 )
 
+// All four lists have to reach the filter they belong to. A list that is
+// compiled but never wired is invisible: the agent exports the unnarrowed view
+// while selection() still echoes the list into the batch, so the backend is
+// told about a filter that was never applied.
 func TestNewCompilesFilters(t *testing.T) {
 	c, err := New(nil, Options{
-		TopicIncludeRegex: "^prod\\.",
-		TopicExcludeRegex: "-dlq$",
-		GroupExcludeRegex: "^test-",
+		TopicInclude: []string{"/^prod\\./"},
+		TopicExclude: []string{"/-dlq$/"},
+		GroupInclude: []string{"/^svc-/", "payments"},
+		GroupExclude: []string{"/^test-/"},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -25,14 +30,26 @@ func TestNewCompilesFilters(t *testing.T) {
 	if !c.topics.allow("prod.orders") {
 		t.Error("prod.orders should be allowed")
 	}
+	if c.topics.allow("dev.orders") {
+		t.Error("dev.orders should not survive the topic include list")
+	}
 	if c.topics.allow("prod.orders-dlq") {
 		t.Error("prod.orders-dlq should be excluded")
 	}
-	if c.groups.allow("test-consumer") {
-		t.Error("test-consumer should be excluded")
+	if !c.groups.allow("svc-billing") {
+		t.Error("svc-billing should survive the group include list")
 	}
 	if !c.groups.allow("payments") {
-		t.Error("payments should be allowed")
+		t.Error("payments is a literal entry in the group include list")
+	}
+	if c.groups.allow("payments-v2") {
+		t.Error("the literal group entry must not admit a longer name")
+	}
+	if c.groups.allow("reporting") {
+		t.Error("reporting matches no group include entry and must be dropped")
+	}
+	if c.groups.allow("test-consumer") {
+		t.Error("test-consumer should be excluded")
 	}
 	if c.log == nil {
 		t.Error("logger must default to slog.Default()")
@@ -40,10 +57,16 @@ func TestNewCompilesFilters(t *testing.T) {
 }
 
 func TestNewRejectsBadFilters(t *testing.T) {
-	if _, err := New(nil, Options{TopicIncludeRegex: "(unclosed"}); err == nil {
+	if _, err := New(nil, Options{TopicInclude: []string{"/(unclosed/"}}); err == nil {
 		t.Error("want error for malformed topic include regex")
 	}
-	if _, err := New(nil, Options{GroupExcludeRegex: "(unclosed"}); err == nil {
+	if _, err := New(nil, Options{TopicExclude: []string{"/(unclosed/"}}); err == nil {
+		t.Error("want error for malformed topic exclude regex")
+	}
+	if _, err := New(nil, Options{GroupInclude: []string{"/(unclosed/"}}); err == nil {
+		t.Error("want error for malformed group include regex")
+	}
+	if _, err := New(nil, Options{GroupExclude: []string{"/(unclosed/"}}); err == nil {
 		t.Error("want error for malformed group exclude regex")
 	}
 }
@@ -263,7 +286,7 @@ func TestFinalizeCleanBatchCarriesNoTruncation(t *testing.T) {
 // A filtered entity leaves no trace in the payload, so the filters themselves
 // have to travel with it or the omission is unknowable at the far end.
 func TestFinalizeEchoesTheSelectionInForce(t *testing.T) {
-	c, err := New(nil, Options{TopicExcludeRegex: "^shadow-", GroupStates: []string{"Stable"}})
+	c, err := New(nil, Options{TopicExclude: []string{"/^shadow-/"}, GroupStates: []string{"Stable"}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -274,8 +297,8 @@ func TestFinalizeEchoesTheSelectionInForce(t *testing.T) {
 	if batch.Selection == nil {
 		t.Fatal("selection = nil, want the filters in force echoed")
 	}
-	if batch.Selection.TopicExclude != "^shadow-" {
-		t.Errorf("selection = %+v, want the topic filter", batch.Selection)
+	if len(batch.Selection.TopicExclude) != 1 || batch.Selection.TopicExclude[0] != "/^shadow-/" {
+		t.Errorf("selection = %+v, want the topic filter as written", batch.Selection)
 	}
 	if len(batch.Selection.GroupStates) != 1 || batch.Selection.GroupStates[0] != "Stable" {
 		t.Errorf("selection = %+v, want the broker-side state filter", batch.Selection)

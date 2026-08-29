@@ -194,10 +194,10 @@ func collectorOptions(cfg *config.Config, logger *slog.Logger) collector.Options
 	return collector.Options{
 		Timeout:               cfg.CollectionTimeout,
 		IncludeInternalTopics: cfg.IncludeInternalTopics,
-		TopicIncludeRegex:     cfg.TopicIncludeRegex,
-		TopicExcludeRegex:     cfg.TopicExcludeRegex,
-		GroupIncludeRegex:     cfg.GroupIncludeRegex,
-		GroupExcludeRegex:     cfg.GroupExcludeRegex,
+		TopicInclude:          cfg.TopicInclude,
+		TopicExclude:          cfg.TopicExclude,
+		GroupInclude:          cfg.GroupInclude,
+		GroupExclude:          cfg.GroupExclude,
 		GroupStates:           cfg.GroupStates,
 
 		CollectLastStableOffset: cfg.CollectLastStableOffset,

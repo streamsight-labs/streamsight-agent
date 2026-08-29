@@ -127,10 +127,14 @@ type Batch struct {
 // omitted when unset, and the whole block is absent when nothing narrows the
 // view.
 type Selection struct {
-	TopicInclude string `json:"topic_include,omitempty"`
-	TopicExclude string `json:"topic_exclude,omitempty"`
-	GroupInclude string `json:"group_include,omitempty"`
-	GroupExclude string `json:"group_exclude,omitempty"`
+	// The four filter lists carry the entries exactly as they were configured:
+	// a literal stays unescaped, a regex keeps its slashes. That is what a
+	// backend can show an operator and what the operator can diff against their
+	// own deployment; the compiled `^orders\.events$` is neither.
+	TopicInclude []string `json:"topic_include,omitempty"`
+	TopicExclude []string `json:"topic_exclude,omitempty"`
+	GroupInclude []string `json:"group_include,omitempty"`
+	GroupExclude []string `json:"group_exclude,omitempty"`
 	// GroupStates is filtered by the BROKER, so the groups it removes never
 	// reach the agent at all.
 	GroupStates []string `json:"group_states,omitempty"`

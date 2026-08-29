@@ -119,9 +119,12 @@ member *metadata*, plus committed offsets and log-end offsets — that is,
 numbers and names. Names are not necessarily non-sensitive: topic names, group
 names, client IDs, and consumer group `metadata` blobs are included verbatim,
 and organisations do sometimes put customer identifiers in a topic name.
-`TOPIC_EXCLUDE_REGEX` and `GROUP_EXCLUDE_REGEX` (compiled at startup, applied
-in the agent before anything is exported) are the supported way to keep those
-out of a batch. Record keys, record values, and headers are never collected in
+`TOPIC_EXCLUDE` and `GROUP_EXCLUDE` (comma-separated lists of names, each
+entry an exact name unless wrapped in slashes to make it a regex, compiled at
+startup and applied in the agent before anything is exported) are the supported
+way to keep those out of a batch. Naming a topic exactly is the common case and
+the safe one: the entry is escaped, so a name containing a dot excludes that
+topic and no other. Record keys, record values, and headers are never collected in
 any mode.
 
 **Credentials.** `KAFKA_SASL_PASSWORD` and `API_KEY` are read from the

@@ -124,12 +124,31 @@ collection:
   timeout: ""
   # INCLUDE_INTERNAL_TOPICS -- __consumer_offsets and friends.
   includeInternalTopics: false
-  # Filters. Empty means match everything. Exclude wins over include.
-  # Compiled at startup, so a bad pattern fails the pod immediately.
-  topicIncludeRegex: ""
-  topicExcludeRegex: ""
-  groupIncludeRegex: ""
-  groupExcludeRegex: ""
+  # Filters. Each is a comma-separated list, and an empty list -- the default
+  # for all four -- means match everything. An entry is a LITERAL name by
+  # default: "orders.events" is escaped and anchored before it is compiled, so
+  # it matches the topic of exactly that name and nothing else. That is the
+  # point of the default. Kafka names are full of dots and "." is a regex
+  # wildcard, so a pattern spelled "orders.events" would also match
+  # "ordersXevents" and quietly take a topic nobody asked for. Wrap an entry in
+  # slashes to get a regular expression instead: "/^tmp-.*/" compiles the text
+  # between the slashes, unanchored exactly as written, so "/orders/" also
+  # matches prod.orders -- anchor it yourself with ^ and $ when you do not want
+  # that. A non-empty include list is a union (any entry matching makes the
+  # name a candidate) and exclude wins over include, so a name matching both is
+  # dropped. Every entry is compiled at startup, so a malformed expression --
+  # or an empty "//", rejected because an empty list already says "everything"
+  # and so "//" is far more likely a typo -- fails the pod immediately rather
+  # than on the first collection tick.
+  #
+  #   topicInclude: "orders.events,payments.v2"
+  #   topicExclude: "/-dlq$/,/^tmp-/"
+  #   groupInclude: "/^svc-/"
+  #   groupExclude: "svc-canary"
+  topicInclude: ""
+  topicExclude: ""
+  groupInclude: ""
+  groupExclude: ""
   # GROUP_STATES -- comma separated, e.g. "Stable,Empty". Empty means every
   # state. Valid: Unknown, PreparingRebalance, CompletingRebalance, Stable,
   # Dead, Empty (case-insensitive; an unrecognised state fails the pod).
@@ -156,7 +175,7 @@ collection:
   #
   # The response is O(replicas) = partitions x replication factor and is the
   # largest section the agent emits, which is what logDirsEvery is for. On a
-  # wide cluster narrow topicIncludeRegex/topicExcludeRegex -- unlike the offset
+  # wide cluster narrow topicInclude/topicExclude -- unlike the offset
   # listings, the log-dir request names partitions explicitly, so the filter
   # shrinks the request and not just the payload.
   collectLogDirs: true
@@ -244,14 +263,16 @@ collection:
   #   agent.rpc       -- counters from kgo hooks on traffic already happening:
   #     no request, no ACL, no broker work.
 
-# Cardinality caps: hard ceilings on what one batch may contain.
+# Cardinality caps: two ceilings, both on errors[], and nothing else.
 #
-# Every ENTITY cap defaults to 0 = unlimited, and that is deliberate -- a
-# non-zero default would silently shorten the customer's own inventory on first
-# deploy. Use collection.topicIncludeRegex / groupIncludeRegex for intentional
-# selection; use these when you have measured the cluster and need a ceiling.
-# Setting any of them logs a startup warning. None of them adds a request or an
-# ACL. A cap left at 0 is not rendered into the ConfigMap at all.
+# Selection is not a cardinality question -- collection.topicInclude and
+# groupInclude decide what the agent is pointed at, and these two are the
+# backstop against an error storm from a cluster that is misbehaving. Neither
+# adds a request or an ACL. Both are rendered unconditionally, unlike the
+# cadence keys above: they have real non-zero defaults rather than a
+# compiled-in "unset", so there is no absent state for an empty value to mean.
+# Only maxErrors: 0 logs a startup warning, because it is the one setting that
+# removes a ceiling rather than choosing one.
 limits:
   # MAX_ERRORS -- bounds errors[] per batch. 0 = unlimited (and warns).
   # Errors are deduplicated unconditionally, so this backstop essentially
@@ -265,9 +286,9 @@ limits:
   # There is no cap on topics, partitions, groups or offsets, and no value here
   # for one. A batch describes everything it was pointed at or says which
   # section failed; what a deployment does not want to watch belongs in
-  # collection.topicIncludeRegex and friends, which shrink the same broker
-  # requests a cap would have and are echoed in the batch's `selection` block so
-  # the backend knows what it is looking at.
+  # collection.topicInclude and friends, which shrink the same broker requests
+  # a cap would have and are echoed in the batch's `selection` block so the
+  # backend knows what it is looking at.
 
 agent:
   # LOG_LEVEL -- debug | info | warn | error. Logs go to stderr, so stdout

@@ -242,10 +242,13 @@ type Config struct {
 	CollectionInterval    time.Duration
 	CollectionTimeout     time.Duration
 	IncludeInternalTopics bool
-	TopicIncludeRegex     string
-	TopicExcludeRegex     string
-	GroupIncludeRegex     string
-	GroupExcludeRegex     string
+	// The four selection lists. Each entry is a literal topic or group name
+	// unless it is wrapped in slashes, in which case the text between them is a
+	// regular expression -- see validatePattern. An empty list means everything.
+	TopicInclude []string
+	TopicExclude []string
+	GroupInclude []string
+	GroupExclude []string
 	// GroupStates restricts the ListGroups broadcast to these states, in the
 	// broker's own capitalisation; empty means every state. It is the only
 	// cardinality control the broker applies before building the response, so
@@ -375,10 +378,10 @@ func Load() (*Config, error) {
 	}
 
 	c.IncludeInternalTopics = p.boolean("INCLUDE_INTERNAL_TOPICS", false)
-	c.TopicIncludeRegex = p.regex("TOPIC_INCLUDE_REGEX")
-	c.TopicExcludeRegex = p.regex("TOPIC_EXCLUDE_REGEX")
-	c.GroupIncludeRegex = p.regex("GROUP_INCLUDE_REGEX")
-	c.GroupExcludeRegex = p.regex("GROUP_EXCLUDE_REGEX")
+	c.TopicInclude = p.patterns("TOPIC_INCLUDE")
+	c.TopicExclude = p.patterns("TOPIC_EXCLUDE")
+	c.GroupInclude = p.patterns("GROUP_INCLUDE")
+	c.GroupExclude = p.patterns("GROUP_EXCLUDE")
 	// A misspelt state is not a no-op: the broker matches literally, so
 	// GROUP_STATES=Stabel lists nothing and the batch reports a cluster with no
 	// consumer groups.
@@ -555,7 +558,8 @@ func (c *Config) Redacted() string {
 	fmt.Fprintf(&b, " collection_interval=%s collection_timeout=%s include_internal_topics=%t",
 		c.CollectionInterval, c.CollectionTimeout, c.IncludeInternalTopics)
 	fmt.Fprintf(&b, " topic_include=%s topic_exclude=%s group_include=%s group_exclude=%s",
-		orNone(c.TopicIncludeRegex), orNone(c.TopicExcludeRegex), orNone(c.GroupIncludeRegex), orNone(c.GroupExcludeRegex))
+		orNone(strings.Join(c.TopicInclude, ",")), orNone(strings.Join(c.TopicExclude, ",")),
+		orNone(strings.Join(c.GroupInclude, ",")), orNone(strings.Join(c.GroupExclude, ",")))
 	fmt.Fprintf(&b, " group_states=%s", orNone(strings.Join(c.GroupStates, ",")))
 	// Every collector knob is printed, including the ones that default on. This
 	// line is the only record of what an agent was actually running with, and
@@ -706,16 +710,45 @@ func (p *parser) boolean(key string, def bool) bool {
 	return b
 }
 
-// regex validates the pattern at startup and discards the compiled value; the
-// collector owns compilation. A bad pattern must not wait for the first cycle
-// to be noticed.
-func (p *parser) regex(key string) string {
-	v := os.Getenv(key)
-	if v == "" {
-		return ""
+// patterns reads a comma-separated selection list -- topic or group names --
+// and validates every entry at startup, discarding the compiled values; the
+// collector owns compilation. A bad entry must not wait for the first cycle to
+// be noticed, because a process that starts and then exports nothing looks
+// exactly like a cluster with nothing in it.
+//
+// The list itself is kept as written, since it is echoed into every batch's
+// selection block.
+func (p *parser) patterns(key string) []string {
+	list := splitList(os.Getenv(key))
+	for _, entry := range list {
+		p.validatePattern(key, entry)
 	}
-	if _, err := regexp.Compile(v); err != nil {
-		p.errf("%s is not a valid regular expression: %v", key, err)
+	return list
+}
+
+// validatePattern applies the entry convention: a literal unless wrapped in
+// slashes, in which case the text between them is a regular expression.
+//
+// Only the slash-wrapped form can fail. A literal is regex-escaped before it is
+// compiled, so no character an operator can type makes it invalid -- which is
+// the whole reason literals are the default, given how many Kafka topic names
+// contain a dot.
+//
+// collector.compilePattern is the paired definition and does the real
+// compiling; the two must agree on what counts as the regex form. This one only
+// has to decide whether the entry would compile, so it never builds the literal
+// pattern it would otherwise throw away.
+func (p *parser) validatePattern(key, entry string) {
+	if len(entry) < 2 || !strings.HasPrefix(entry, "/") || !strings.HasSuffix(entry, "/") {
+		return
 	}
-	return v
+	body := entry[1 : len(entry)-1]
+	if body == "" {
+		p.errf("%s entry %q is an empty regex; write /.*/ to match everything, or leave %s unset",
+			key, entry, key)
+		return
+	}
+	if _, err := regexp.Compile(body); err != nil {
+		p.errf("%s entry %q is not a valid regular expression: %v", key, entry, err)
+	}
 }

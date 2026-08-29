@@ -165,12 +165,12 @@ sections[].sampled_at time.Time
 sections[].status metrics.SectionStatus
 sections[].truncated bool omitempty
 selection *metrics.Selection nullable omitempty
-selection.group_exclude string omitempty
-selection.group_include string omitempty
+selection.group_exclude []string omitempty
+selection.group_include []string omitempty
 selection.group_states []string omitempty
 selection.include_internal_topics bool omitempty
-selection.topic_exclude string omitempty
-selection.topic_include string omitempty
+selection.topic_exclude []string omitempty
+selection.topic_include []string omitempty
 share_groups []metrics.ShareGroup omitempty
 share_groups[].assignment_epoch int32
 share_groups[].assignor string omitempty
