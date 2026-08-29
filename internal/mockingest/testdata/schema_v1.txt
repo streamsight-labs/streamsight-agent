@@ -124,13 +124,6 @@ groups[].members[].target_assignment[].topic string
 groups[].protocol string omitempty
 groups[].protocol_type string omitempty
 groups[].state string
-limits *metrics.Limits nullable omitempty
-limits.max_error_samples int omitempty
-limits.max_errors int omitempty
-limits.max_groups int omitempty
-limits.max_offsets_per_group int omitempty
-limits.max_partitions_per_topic int omitempty
-limits.max_topics int omitempty
 log_dirs []metrics.LogDir omitempty
 log_dirs[].broker int32
 log_dirs[].dir string
@@ -171,6 +164,13 @@ sections[].name string
 sections[].sampled_at time.Time
 sections[].status metrics.SectionStatus
 sections[].truncated bool omitempty
+selection *metrics.Selection nullable omitempty
+selection.group_exclude string omitempty
+selection.group_include string omitempty
+selection.group_states []string omitempty
+selection.include_internal_topics bool omitempty
+selection.topic_exclude string omitempty
+selection.topic_include string omitempty
 share_groups []metrics.ShareGroup omitempty
 share_groups[].assignment_epoch int32
 share_groups[].assignor string omitempty
@@ -241,7 +241,3 @@ topics[].replication_factor int
 truncation *metrics.Truncation nullable omitempty
 truncation.errors_collapsed int omitempty
 truncation.errors_dropped int omitempty
-truncation.groups int omitempty
-truncation.offsets int omitempty
-truncation.partitions int omitempty
-truncation.topics int omitempty

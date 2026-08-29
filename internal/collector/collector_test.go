@@ -85,7 +85,7 @@ func TestFinalizeReportsCollapsedErrorsAtBatchLevel(t *testing.T) {
 	}
 
 	batch := &metrics.Batch{}
-	c.finalize(batch, secs, 0)
+	c.finalize(batch, secs)
 
 	if batch.Truncation == nil {
 		t.Fatal("a batch whose errors were collapsed must carry a truncation block")
@@ -95,9 +95,6 @@ func TestFinalizeReportsCollapsedErrorsAtBatchLevel(t *testing.T) {
 	}
 	if len(batch.Errors) != 1 || batch.Errors[0].Count != 500 {
 		t.Fatalf("errors = %+v, want one entry with count 500", batch.Errors)
-	}
-	if batch.Limits != nil {
-		t.Error("limits must stay absent when no cap is configured")
 	}
 
 	// The section is still partial: collapsing must not hide the failure.
@@ -167,7 +164,7 @@ func TestFinalizeEmitsEverySectionEvenWhenSkipped(t *testing.T) {
 	}
 
 	batch := &metrics.Batch{}
-	c.finalize(batch, secs, 0)
+	c.finalize(batch, secs)
 
 	if len(batch.Sections) != len(wantOrder) {
 		t.Fatalf("got %d sections, want %d", len(batch.Sections), len(wantOrder))
@@ -253,7 +250,7 @@ func TestFinalizeCleanBatchCarriesNoTruncation(t *testing.T) {
 	}
 	secs := []*section{newSection(sectionCluster), newSection(sectionTopics)}
 	batch := &metrics.Batch{}
-	c.finalize(batch, secs, 0)
+	c.finalize(batch, secs)
 
 	if batch.Truncation != nil {
 		t.Errorf("truncation = %+v on a complete batch, want nil", *batch.Truncation)
@@ -263,29 +260,41 @@ func TestFinalizeCleanBatchCarriesNoTruncation(t *testing.T) {
 	}
 }
 
-func TestFinalizeCountsGroupListTruncationOnce(t *testing.T) {
-	// MaxGroups shortens both sections from one enforcement point, so the count
-	// belongs at batch level exactly once.
-	c, err := New(nil, Options{Limits: Limits{MaxGroups: 10}})
+// A filtered entity leaves no trace in the payload, so the filters themselves
+// have to travel with it or the omission is unknowable at the far end.
+func TestFinalizeEchoesTheSelectionInForce(t *testing.T) {
+	c, err := New(nil, Options{TopicExcludeRegex: "^shadow-", GroupStates: []string{"Stable"}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	groupsSec, offsetsSec := c.newSection(sectionGroups), c.newSection(sectionOffsets)
-	groupsSec.truncated = true
-	offsetsSec.truncated = true
 
 	batch := &metrics.Batch{}
-	c.finalize(batch, []*section{groupsSec, offsetsSec}, 7)
+	c.finalize(batch, nil)
 
-	if batch.Truncation == nil || batch.Truncation.Groups != 7 {
-		t.Fatalf("truncation = %+v, want groups 7 counted once", batch.Truncation)
+	if batch.Selection == nil {
+		t.Fatal("selection = nil, want the filters in force echoed")
 	}
-	for _, s := range batch.Sections {
-		if !s.Truncated {
-			t.Errorf("section %q must admit it is short", s.Name)
-		}
+	if batch.Selection.TopicExclude != "^shadow-" {
+		t.Errorf("selection = %+v, want the topic filter", batch.Selection)
 	}
-	if batch.Limits == nil || batch.Limits.MaxGroups != 10 {
-		t.Errorf("limits = %+v, want the caps in force echoed", batch.Limits)
+	if len(batch.Selection.GroupStates) != 1 || batch.Selection.GroupStates[0] != "Stable" {
+		t.Errorf("selection = %+v, want the broker-side state filter", batch.Selection)
+	}
+}
+
+// The inverse, and the one that carries the promise: an unfiltered agent must
+// emit no block at all, because presence is what says "this is less than the
+// whole cluster".
+func TestFinalizeOmitsTheSelectionWhenNothingIsFiltered(t *testing.T) {
+	c, err := New(nil, Options{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	batch := &metrics.Batch{}
+	c.finalize(batch, nil)
+
+	if batch.Selection != nil {
+		t.Errorf("selection = %+v on an unfiltered agent, want nil", batch.Selection)
 	}
 }

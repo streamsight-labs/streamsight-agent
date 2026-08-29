@@ -57,12 +57,7 @@ func (c *Collector) collectThroughputWindow(ctx context.Context, tds kadm.TopicD
 
 	// Same inputs as the topics phase, so the windows land on exactly the topics
 	// in topics[] and a backend never gets a window with no join partner.
-	selected, dropped := selectTopics(tds, c.topics, c.opts.IncludeInternalTopics, c.limits.MaxTopics)
-	if dropped > 0 {
-		// A flag, never a count: the topics phase counts the same topics into the
-		// batch total.
-		sec.truncated = true
-	}
+	selected := selectTopics(tds, c.topics, c.opts.IncludeInternalTopics)
 	if len(selected) == 0 {
 		// Never fall through to a bare ListOffsetsAfterMilli: with no topic
 		// arguments kadm lists the entire cluster, which is the opposite of a

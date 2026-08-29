@@ -22,7 +22,7 @@ import (
 // in each phase would let the two sections disagree about which groups exist —
 // a data integrity bug, not a payload one. listed.Sorted() makes the retained
 // prefix the same set every cycle.
-func (c *Collector) listGroups(ctx context.Context) (ids []string, types map[string]string, dropped int, err error) {
+func (c *Collector) listGroups(ctx context.Context) (ids []string, types map[string]string, err error) {
 	listed, types, err := c.listGroupsWithTypes(ctx)
 
 	ids = make([]string, 0, len(listed))
@@ -35,8 +35,7 @@ func (c *Collector) listGroups(ctx context.Context) (ids []string, types map[str
 		}
 		ids = append(ids, g)
 	}
-	keep, dropped := capLen(len(ids), c.limits.MaxGroups)
-	return ids[:keep], types, dropped, err
+	return ids, types, err
 }
 
 // listGroupsWithTypes issues the ListGroups broadcast this cycle needs anyway,
@@ -87,16 +86,10 @@ func (c *Collector) listGroupsWithTypes(ctx context.Context) ([]string, map[stri
 }
 
 // collectGroups describes every listed group. listedAt is when the shared
-// ListGroups call was issued, so SampledAt covers the listing too. listDropped
-// is how many groups MaxGroups removed: the count is reported once at batch
-// level, but this section must still admit it is short.
-func (c *Collector) collectGroups(ctx context.Context, ids []string, types map[string]string, listDropped int, listErr error, listedAt time.Time) ([]metrics.GroupMetrics, *section) {
+// ListGroups call was issued, so SampledAt covers the listing too.
+func (c *Collector) collectGroups(ctx context.Context, ids []string, types map[string]string, listErr error, listedAt time.Time) ([]metrics.GroupMetrics, *section) {
 	sec := c.newSectionAt(sectionGroups, listedAt)
 	defer sec.stop()
-
-	if listDropped > 0 {
-		sec.truncated = true
-	}
 
 	sec.request("ListGroups", listErr)
 	if len(ids) == 0 {

@@ -104,11 +104,7 @@ func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, ru
 		return nil, skipped()
 	}
 
-	selected, droppedTopics := selectTopics(tds, c.topics, c.opts.IncludeInternalTopics, c.limits.MaxTopics)
-	if droppedTopics > 0 {
-		sec.dropped.Topics = droppedTopics
-		sec.truncated = true
-	}
+	selected := selectTopics(tds, c.topics, c.opts.IncludeInternalTopics)
 	if len(selected) == 0 {
 		// Never fall through to a bare List*Offsets: with no topic arguments
 		// kadm lists the entire cluster, which is the opposite of a filter.
@@ -264,16 +260,17 @@ func (s *offsetSample) lookup(topic string, partition int32) (*int64, error) {
 	return lookupOffset(s.sec, s.api, s.listed, topic, partition)
 }
 
-// selectTopics applies the internal-topic rule, the regex filter and maxTopics,
-// in that order, over kadm's deterministic Sorted() order.
+// selectTopics applies the internal-topic rule and the regex filter over kadm's
+// deterministic Sorted() order.
 //
-// The order matters: a topic the operator already excluded by regex must not
-// consume cap budget. Truncation is a stable prefix, so the same topics are kept
-// every cycle and the backend does not see churn that looks like a cluster
-// event. maxTopics reduces broker load only because it is applied here, before
-// the List*Offsets name list is built.
-func selectTopics(tds kadm.TopicDetails, f *filter, includeInternal bool, maxTopics int) (selected []kadm.TopicDetail, dropped int) {
-	selected = make([]kadm.TopicDetail, 0, len(tds))
+// Sorted, not map order: the emitted order must be identical cycle to cycle or a
+// backend diffing consecutive batches sees churn that looks like a cluster event.
+//
+// Nothing here caps the result. The filter is the only thing that narrows it, and
+// it reduces broker load rather than just payload because it runs HERE -- before
+// the List*Offsets name list and the DescribeLogDirs partition set are built.
+func selectTopics(tds kadm.TopicDetails, f *filter, includeInternal bool) []kadm.TopicDetail {
+	selected := make([]kadm.TopicDetail, 0, len(tds))
 	for _, td := range tds.Sorted() {
 		if td.IsInternal && !includeInternal {
 			continue
@@ -283,8 +280,7 @@ func selectTopics(tds kadm.TopicDetails, f *filter, includeInternal bool, maxTop
 		}
 		selected = append(selected, td)
 	}
-	keep, dropped := capLen(len(selected), maxTopics)
-	return selected[:keep], dropped
+	return selected
 }
 
 // buildTopic shapes one topic's metrics and records its per-partition failures.
@@ -304,19 +300,13 @@ func (c *Collector) buildTopic(td kadm.TopicDetail, sec *section, starts, lsos, 
 	}
 
 	parts := td.Partitions.Sorted()
-	// Both summaries are computed over the FULL partition slice, before the cap:
-	// PartitionCount stays true so len(Partitions) < PartitionCount is the
-	// truncation signal, and a minimum over an arbitrary prefix would make a
-	// truncated topic report a durability floor it does not have.
+	// PartitionCount is the topic's own count rather than len(Partitions), which
+	// is now the same number: nothing caps the list. It stays a separate field
+	// because a partition whose metadata failed still counts as existing.
 	tm.PartitionCount = len(parts)
 	tm.ReplicationFactor = replicationFactor(parts)
 
-	keep, dropped := capLen(len(parts), c.limits.MaxPartitionsPerTopic)
-	if dropped > 0 {
-		sec.dropped.Partitions += dropped
-		sec.truncated = true
-	}
-	emit := parts[:keep]
+	emit := parts
 
 	// Once per topic: a topic missing from a listing is one error, not
 	// len(partitions) of them.

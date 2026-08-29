@@ -87,11 +87,8 @@ func TestLogDirTopicsCarriesExplicitPartitionIDs(t *testing.T) {
 		}},
 	}
 
-	set, truncated := c.logDirTopics(tds)
+	set := c.logDirTopics(tds)
 
-	if truncated {
-		t.Error("no cap is set, so nothing was truncated")
-	}
 	if len(set) != 1 {
 		t.Fatalf("set = %v, want only the non-internal topic", set)
 	}
@@ -100,25 +97,24 @@ func TestLogDirTopicsCarriesExplicitPartitionIDs(t *testing.T) {
 	}
 }
 
-func TestLogDirTopicsHonoursTheTopicCaps(t *testing.T) {
+func TestLogDirTopicsHonoursTheTopicFilter(t *testing.T) {
 	// log_dirs must describe exactly the topics topics[] describes, or a backend
-	// joining bytes onto partition inventory gets rows with no join partner.
-	c := logDirCollector(t, Options{Limits: Limits{MaxTopics: 1, MaxPartitionsPerTopic: 2}})
+	// joining bytes onto partition inventory gets rows with no join partner. The
+	// filter is also what bounds this request on the wire, since the log-dir
+	// request names every partition explicitly.
+	c := logDirCollector(t, Options{TopicExcludeRegex: "^b$"})
 	tds := kadm.TopicDetails{
 		"a": {Topic: "a", Partitions: kadm.PartitionDetails{0: {Partition: 0}, 1: {Partition: 1}, 2: {Partition: 2}}},
 		"b": {Topic: "b", Partitions: kadm.PartitionDetails{0: {Partition: 0}}},
 	}
 
-	set, truncated := c.logDirTopics(tds)
+	set := c.logDirTopics(tds)
 
-	if !truncated {
-		t.Error("both caps fired; the section must admit it is short")
-	}
 	if len(set) != 1 || set["a"] == nil {
-		t.Fatalf("set = %v, want the sorted prefix {a}", set)
+		t.Fatalf("set = %v, want only the unfiltered topic {a}", set)
 	}
-	if len(set["a"]) != 2 {
-		t.Errorf("a carries %d partitions, want the capped 2", len(set["a"]))
+	if len(set["a"]) != 3 {
+		t.Errorf("a carries %d partitions, want all 3: nothing caps the list", len(set["a"]))
 	}
 }
 

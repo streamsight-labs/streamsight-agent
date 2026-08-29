@@ -156,8 +156,8 @@ collection:
   #
   # The response is O(replicas) = partitions x replication factor and is the
   # largest section the agent emits, which is what logDirsEvery is for. On a
-  # wide cluster set limits.maxPartitionsPerTopic -- unlike the offset
-  # listings, the log-dir request names partitions explicitly, so that cap
+  # wide cluster narrow topicIncludeRegex/topicExcludeRegex -- unlike the offset
+  # listings, the log-dir request names partitions explicitly, so the filter
   # shrinks the request and not just the payload.
   collectLogDirs: true
   # LOG_DIRS_EVERY -- run the log-dirs phase every Nth cycle. Must be >= 1
@@ -261,19 +261,13 @@ limits:
   # MAX_ERROR_SAMPLES -- verbatim occurrences per distinct failure mode before
   # the rest are folded into the exemplar's count. Must be >= 1.
   maxErrorSamples: 1
-  # MAX_TOPICS -- also shrinks the request fan-out (the topic list sent to the
-  # offset listings and to DescribeLogDirs).
-  maxTopics: 0
-  # MAX_PARTITIONS_PER_TOPIC -- payload cap for the offset listings (the broker
-  # computes every partition regardless), but it does shrink the log-dirs
-  # request, whose partitions are named on the wire.
-  maxPartitionsPerTopic: 0
-  # MAX_GROUPS -- enforced once on the shared ListGroups result, so it shrinks
-  # the DescribeGroups and OffsetFetch fan-out AND truncates the offsets
-  # section, not just groups.
-  maxGroups: 0
-  # MAX_OFFSETS_PER_GROUP
-  maxOffsetsPerGroup: 0
+  #
+  # There is no cap on topics, partitions, groups or offsets, and no value here
+  # for one. A batch describes everything it was pointed at or says which
+  # section failed; what a deployment does not want to watch belongs in
+  # collection.topicIncludeRegex and friends, which shrink the same broker
+  # requests a cap would have and are echoed in the batch's `selection` block so
+  # the backend knows what it is looking at.
 
 agent:
   # LOG_LEVEL -- debug | info | warn | error. Logs go to stderr, so stdout

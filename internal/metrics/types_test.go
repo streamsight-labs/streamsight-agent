@@ -20,9 +20,10 @@ func marshalMap(t *testing.T, v any) map[string]any {
 }
 
 func TestSchemaVersionUnchanged(t *testing.T) {
-	// Everything since v1 has been an added field, and no enum gained a value,
-	// so a v1 consumer that ignores unknown keys is unaffected. Adding a
-	// SectionStatus value is the change that would force a bump.
+	// v1 is still being shaped: the agent is unreleased and nothing consumes a
+	// batch it did not produce, so fields have both arrived and left under this
+	// version. The bump matters from the first release onwards, and TestSchemaV1Frozen
+	// is what makes any change to the shape a deliberate one until then.
 	if SchemaVersion != 1 {
 		t.Fatalf("SchemaVersion = %d, want 1", SchemaVersion)
 	}
@@ -34,29 +35,47 @@ func TestBatchOmitsTruncationWhenComplete(t *testing.T) {
 	if _, ok := m["truncation"]; ok {
 		t.Error("truncation must be absent on a complete batch")
 	}
-	if _, ok := m["limits"]; ok {
-		t.Error("limits must be absent when every cap is unlimited")
+	if _, ok := m["selection"]; ok {
+		t.Error("selection must be absent when nothing narrows the view")
+	}
+}
+
+func TestSelectionPresenceMarksANarrowedView(t *testing.T) {
+	// Presence is the whole signal: a filtered entity leaves no other trace in
+	// the payload, so this block is the only thing that can tell a backend the
+	// batch is not the whole cluster.
+	m := marshalMap(t, Batch{SchemaVersion: SchemaVersion,
+		Selection: &Selection{TopicExclude: "^shadow-"}})
+	sel, ok := m["selection"].(map[string]any)
+	if !ok {
+		t.Fatalf("selection = %v, want an object", m["selection"])
+	}
+	if sel["topic_exclude"] != "^shadow-" {
+		t.Errorf("selection.topic_exclude = %v, want the configured pattern", sel["topic_exclude"])
+	}
+	if _, ok := sel["topic_include"]; ok {
+		t.Error("unset filters must be omitted")
 	}
 }
 
 func TestTruncationPresenceMarksIncompleteBatch(t *testing.T) {
-	m := marshalMap(t, Batch{SchemaVersion: SchemaVersion, Truncation: &Truncation{Offsets: 3}})
+	m := marshalMap(t, Batch{SchemaVersion: SchemaVersion, Truncation: &Truncation{ErrorsDropped: 3}})
 	trunc, ok := m["truncation"].(map[string]any)
 	if !ok {
 		t.Fatalf("truncation = %v, want an object", m["truncation"])
 	}
-	if trunc["offsets"] != float64(3) {
-		t.Errorf("truncation.offsets = %v, want 3", trunc["offsets"])
+	if trunc["errors_dropped"] != float64(3) {
+		t.Errorf("truncation.errors_dropped = %v, want 3", trunc["errors_dropped"])
 	}
-	if _, ok := trunc["topics"]; ok {
+	if _, ok := trunc["errors_collapsed"]; ok {
 		t.Error("zero counters must be omitted")
 	}
 }
 
 func TestTruncationAdd(t *testing.T) {
-	total := Truncation{Topics: 1}
-	total.Add(Truncation{Topics: 2, Partitions: 3, Groups: 4, Offsets: 6, ErrorsCollapsed: 7, ErrorsDropped: 8})
-	want := Truncation{Topics: 3, Partitions: 3, Groups: 4, Offsets: 6, ErrorsCollapsed: 7, ErrorsDropped: 8}
+	total := Truncation{ErrorsCollapsed: 1}
+	total.Add(Truncation{ErrorsCollapsed: 7, ErrorsDropped: 8})
+	want := Truncation{ErrorsCollapsed: 8, ErrorsDropped: 8}
 	if total != want {
 		t.Errorf("Add() = %+v, want %+v", total, want)
 	}

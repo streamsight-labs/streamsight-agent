@@ -85,8 +85,8 @@ const (
 	// Two things to know before sizing a large cluster. The figures describe the
 	// VOLUME, not the directory, so two log dirs on one mount report identical
 	// totals -- group by (broker, total_bytes, usable_bytes) before summing. And
-	// MAX_PARTITIONS_PER_TOPIC does shrink this request, unlike the offset
-	// listings, because the log-dir request names partitions explicitly.
+	// the TOPIC_* filters shrink this request itself, unlike the offset listings,
+	// because the log-dir request names every partition explicitly.
 	DefaultCollectLogDirs = true
 	// DefaultLogDirsEvery samples once every two minutes at the 5s interval.
 	//
@@ -181,12 +181,6 @@ const (
 	// dedup" switch.
 	DefaultMaxErrorSamples = 1
 
-	// Every ENTITY cap defaults to 0 = unlimited. Any non-zero default would be
-	// an untested guess that silently shortens the customer's core data on first
-	// deploy, and TOPIC_INCLUDE_REGEX / GROUP_INCLUDE_REGEX already exist as the
-	// intentional selection tool.
-	DefaultMaxEntities = 0
-
 	// collectionTimeoutRatio derives COLLECTION_TIMEOUT from
 	// COLLECTION_INTERVAL when it is not set explicitly. A cycle that runs
 	// longer than this eats into the next tick, which time.Ticker silently
@@ -277,15 +271,12 @@ type Config struct {
 	CollectTieredOffsets    bool
 	CollectShareGroups      bool
 
-	// Cardinality caps. Zero means unlimited for every entity cap; MaxErrors and
-	// MaxErrorSamples always have a positive default. They cap the batch, not
-	// the cycle, which is why they carry no COLLECTION_ prefix.
-	MaxErrors             int
-	MaxErrorSamples       int
-	MaxTopics             int
-	MaxPartitionsPerTopic int
-	MaxGroups             int
-	MaxOffsetsPerGroup    int
+	// Caps on errors[], and nothing else: no setting shortens the inventory.
+	// What a deployment does not want to watch is said in the TOPIC_*/GROUP_*
+	// filters above, which is a decision rather than an arbitrary prefix of a
+	// sorted list -- and which the batch echoes, so the far end knows.
+	MaxErrors       int
+	MaxErrorSamples int
 
 	LogLevel        string
 	AgentInstanceID string
@@ -448,21 +439,6 @@ func Load() (*Config, error) {
 	if c.MaxErrorSamples < 1 {
 		p.errf("MAX_ERROR_SAMPLES must be >= 1, got %d", c.MaxErrorSamples)
 	}
-	for _, lim := range []struct {
-		key string
-		dst *int
-	}{
-		{"MAX_TOPICS", &c.MaxTopics},
-		{"MAX_PARTITIONS_PER_TOPIC", &c.MaxPartitionsPerTopic},
-		{"MAX_GROUPS", &c.MaxGroups},
-		{"MAX_OFFSETS_PER_GROUP", &c.MaxOffsetsPerGroup},
-	} {
-		*lim.dst = p.integer(lim.key, DefaultMaxEntities)
-		if *lim.dst < 0 {
-			p.errf("%s must be >= 0 (0 = unlimited), got %d", lim.key, *lim.dst)
-		}
-	}
-
 	c.LogLevel = strings.ToLower(strings.TrimSpace(p.str("LOG_LEVEL", DefaultLogLevel)))
 	if _, err := parseLevel(c.LogLevel); err != nil {
 		p.err(err)
@@ -504,26 +480,6 @@ func (c *Config) Warnings() []string {
 		w = append(w, "EXPORT_FILE_MAX_MB is negative: file rotation is disabled and the file will grow without bound")
 	}
 
-	// Every entity cap silently shortens the customer's own inventory, so warn
-	// once per cap that is set.
-	for _, lim := range []struct {
-		key string
-		val int
-	}{
-		{"MAX_TOPICS", c.MaxTopics},
-		{"MAX_PARTITIONS_PER_TOPIC", c.MaxPartitionsPerTopic},
-		{"MAX_GROUPS", c.MaxGroups},
-		{"MAX_OFFSETS_PER_GROUP", c.MaxOffsetsPerGroup},
-	} {
-		if lim.val != 0 {
-			w = append(w, fmt.Sprintf("%s=%d truncates the inventory; prefer TOPIC_INCLUDE_REGEX/GROUP_INCLUDE_REGEX for intentional selection", lim.key, lim.val))
-		}
-	}
-	if c.MaxGroups != 0 {
-		// The name says groups, but it is enforced on the listing that both
-		// sections share.
-		w = append(w, "MAX_GROUPS also truncates the offsets section, not just groups")
-	}
 	if c.MaxErrors == 0 {
 		w = append(w, "MAX_ERRORS=0 leaves errors[] unbounded")
 	}
@@ -627,21 +583,6 @@ func (c *Config) Redacted() string {
 		fmt.Fprintf(&b, " configs_every=%d", c.ConfigsEvery)
 	}
 	fmt.Fprintf(&b, " max_errors=%d max_error_samples=%d", c.MaxErrors, c.MaxErrorSamples)
-	// Only the caps that are set: five "=0" pairs on every startup line would
-	// bury the settings that matter.
-	for _, lim := range []struct {
-		key string
-		val int
-	}{
-		{"max_topics", c.MaxTopics},
-		{"max_partitions_per_topic", c.MaxPartitionsPerTopic},
-		{"max_groups", c.MaxGroups},
-		{"max_offsets_per_group", c.MaxOffsetsPerGroup},
-	} {
-		if lim.val != 0 {
-			fmt.Fprintf(&b, " %s=%d", lim.key, lim.val)
-		}
-	}
 	fmt.Fprintf(&b, " log_level=%s agent_instance_id=%s", c.LogLevel, c.AgentInstanceID)
 	return b.String()
 }

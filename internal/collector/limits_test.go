@@ -36,16 +36,7 @@ func TestCapLen(t *testing.T) {
 	}
 }
 
-func TestLimitsAny(t *testing.T) {
-	if (Limits{}).any() {
-		t.Error("the zero value is unlimited and must not emit a limits block")
-	}
-	if !(Limits{MaxOffsetsPerGroup: 1}).any() {
-		t.Error("a single set cap must emit a limits block")
-	}
-}
-
-func TestSelectTopicsAppliesCapAfterFilters(t *testing.T) {
+func TestSelectTopicsAppliesBothFilters(t *testing.T) {
 	tds := kadm.TopicDetails{
 		"__consumer_offsets": {Topic: "__consumer_offsets", IsInternal: true},
 		"prod.a":             {Topic: "prod.a"},
@@ -59,34 +50,31 @@ func TestSelectTopicsAppliesCapAfterFilters(t *testing.T) {
 		t.Fatalf("newFilter: %v", err)
 	}
 
-	// The regex removes three topics and the internal rule a fourth. None may
-	// consume cap budget, so a cap of 2 keeps two PROD topics.
-	selected, dropped := selectTopics(tds, f, false, 2)
-	if len(selected) != 2 || dropped != 1 {
-		t.Fatalf("selected %d, dropped %d, want 2 and 1", len(selected), dropped)
+	// The regex removes the two staging topics and the internal rule a third.
+	// Everything that survives is shipped: nothing truncates the remainder.
+	selected := selectTopics(tds, f, false)
+	if len(selected) != 3 {
+		t.Fatalf("selected %d, want the three prod topics", len(selected))
 	}
 	for _, td := range selected {
-		if td.Topic != "prod.a" && td.Topic != "prod.b" {
-			t.Errorf("selected %q: the cap must keep the sorted prefix of the filtered set", td.Topic)
+		if td.Topic != "prod.a" && td.Topic != "prod.b" && td.Topic != "prod.c" {
+			t.Errorf("selected %q, want only the prod topics", td.Topic)
 		}
 	}
 
-	selected, dropped = selectTopics(tds, f, false, 0)
-	if len(selected) != 3 || dropped != 0 {
-		t.Fatalf("unlimited: selected %d, dropped %d, want 3 and 0", len(selected), dropped)
+	// The internal rule is the only filter that opts back IN.
+	if selected := selectTopics(tds, nil, true); len(selected) != 6 {
+		t.Fatalf("include internal: selected %d, want all 6", len(selected))
 	}
-
-	// The internal rule is applied before the cap too.
-	selected, _ = selectTopics(tds, nil, true, 0)
-	if len(selected) != 6 {
-		t.Fatalf("include internal: selected %d, want 6", len(selected))
+	if selected := selectTopics(tds, nil, false); len(selected) != 5 {
+		t.Fatalf("exclude internal: selected %d, want 5", len(selected))
 	}
 }
 
-func TestSelectTopicsTruncationIsStablePrefix(t *testing.T) {
-	// Guards Go's map iteration order leaking into the output: a retained prefix
-	// that changed per cycle would show the backend mass entity churn that looks
-	// like a cluster event.
+func TestSelectTopicsOrderIsStable(t *testing.T) {
+	// Guards Go's map iteration order leaking into the output: an order that
+	// changed per cycle would show the backend mass entity churn that looks like
+	// a cluster event.
 	tds := kadm.TopicDetails{}
 	for _, name := range []string{"e", "b", "d", "a", "c", "f", "g", "h"} {
 		tds[name] = kadm.TopicDetail{Topic: name}
@@ -94,12 +82,8 @@ func TestSelectTopicsTruncationIsStablePrefix(t *testing.T) {
 
 	var first []string
 	for i := 0; i < 50; i++ {
-		selected, dropped := selectTopics(tds, nil, false, 3)
-		if dropped != 5 {
-			t.Fatalf("dropped = %d, want 5", dropped)
-		}
 		var got []string
-		for _, td := range selected {
+		for _, td := range selectTopics(tds, nil, false) {
 			got = append(got, td.Topic)
 		}
 		if first == nil {
@@ -115,8 +99,8 @@ func TestSelectTopicsTruncationIsStablePrefix(t *testing.T) {
 			}
 		}
 	}
-	if first[0] != "a" || first[1] != "b" || first[2] != "c" {
-		t.Errorf("prefix = %v, want the sorted prefix a,b,c", first)
+	if len(first) != 8 || first[0] != "a" || first[7] != "h" {
+		t.Errorf("selection = %v, want all eight in sorted order", first)
 	}
 }
 

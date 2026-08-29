@@ -271,7 +271,7 @@ configuration problems at once and exits non-zero — one restart per fix, not f
 | `GROUP_STATES` | `""` (all) | Comma-separated states the broker should list: `Unknown`, `PreparingRebalance`, `CompletingRebalance`, `Stable`, `Dead`, `Empty`. Case-insensitive; an unrecognised state fails startup. Filtered **broker-side**, so it shortens both `groups[]` and `offsets[]` and reports no truncation. **Requires Kafka 2.6+** (ListGroups v4, KIP-518): an older broker drops the filter on the wire and returns every group with no error, so startup probes `ApiVersions` on every broker and refuses to run if any is older. |
 | `COLLECT_LAST_STABLE_OFFSET` | `true` | Adds `partitions[].last_stable_offset` via `ListCommittedOffsets`, sampled between the committed offsets and the high watermarks. Leave it on: without it every `read_committed` consumer on a transactional topic reports permanent false lag. No new ACL; one extra `ListOffsets` fan-out per cycle. |
 | `COLLECT_CONSUMER_GROUPS` | `true` | Adds the KIP-848 fields — `groups[].group_epoch`, `assignment_epoch`, `assignor`, per-member `member_epoch` / `target_assignment` — via `ConsumerGroupDescribe`. It is the only way to see a new-protocol group at all: the classic describe returns one with empty join metadata and **no error**. Needs Kafka 4.0+; startup probes `ApiVersions` and disables it with a log line on an older cluster, so the cost there is one round trip, not a rejected request per cycle. No new ACL. |
-| `COLLECT_LOG_DIRS` | `true` | Adds the `log_dirs[]` section (per-broker, per-directory replica bytes and offline-disk detection) via `DescribeLogDirs`. On by default because it is the only source of per-replica disk bytes, and every storage question the product answers rests on it: days-to-full, per-topic chargeback, follower lag in bytes without JMX, JBOD imbalance, and the average record size that converts every record rate into a byte rate. No ACL beyond the `DESCRIBE` on `CLUSTER` already required, but the response is O(replicas) = partitions × replication factor, the largest payload the agent emits — which is what `LOG_DIRS_EVERY` is for. Size `MAX_TOPICS`/`MAX_PARTITIONS_PER_TOPIC` before running it at `LOG_DIRS_EVERY=1` on a large cluster. |
+| `COLLECT_LOG_DIRS` | `true` | Adds the `log_dirs[]` section (per-broker, per-directory replica bytes and offline-disk detection) via `DescribeLogDirs`. On by default because it is the only source of per-replica disk bytes, and every storage question the product answers rests on it: days-to-full, per-topic chargeback, follower lag in bytes without JMX, JBOD imbalance, and the average record size that converts every record rate into a byte rate. No ACL beyond the `DESCRIBE` on `CLUSTER` already required, but the response is O(replicas) = partitions × replication factor, the largest payload the agent emits — which is what `LOG_DIRS_EVERY` is for. On a large cluster, narrow `TOPIC_INCLUDE_REGEX`/`TOPIC_EXCLUDE_REGEX` before running it at `LOG_DIRS_EVERY=1` — the log-dir request names every partition on the wire, so the filter shrinks the request itself. |
 | `LOG_DIRS_EVERY` | `24` | Run the log-dirs phase every Nth cycle — two minutes at the default interval, because disks fill over hours. Must be >= 1 (`1` = every cycle); `0` is an error, not "every cycle". Ignored when `COLLECT_LOG_DIRS=false`. |
 | `COLLECT_THROUGHPUT_WINDOW` | `false` | Adds `throughput_window` and `partitions[].window` via `ListOffsetsAfterMilli`: the produce rate measured **by the broker**, and the only rate input in the batch that survives an agent restart or a missed cycle. Off by default because it adds a `ListOffsets` fan-out — two on a mostly-silent cluster — to every cycle it runs on. Needs ListOffsets v1 (Kafka 0.10.1+); startup disables it below that, where the broker answers with no timestamp at all and no error. No new ACL. |
 | `THROUGHPUT_WINDOW` | `5m` | How far back the window reaches. It earns its cost only when it is **wider than `COLLECTION_INTERVAL`**: inside one interval a backend can already difference two batches. Must be > 0. |
@@ -320,16 +320,18 @@ ceiling. Setting any of them logs a startup warning.
 |----------|---------|-------|
 | `MAX_ERRORS` | `1000` | Maximum entries in `errors[]` per batch; `0` = unlimited (and logs a warning). Behind deduplication this is a backstop that essentially never fires. When the cap bites, entries are admitted in priority order — whole-request and authorization failures survive ahead of the per-partition flood. |
 | `MAX_ERROR_SAMPLES` | `1` | Verbatim occurrences emitted per distinct failure mode before the rest are folded into the exemplar's `count`. Must be >= 1. |
-| `MAX_TOPICS` | `0` (unlimited) | Maximum topics per batch. Also shrinks the request fan-out: it caps the topic list sent to `ListStartOffsets`/`ListCommittedOffsets`/`ListEndOffsets` and the topic+partition set sent to `DescribeLogDirs`. |
-| `MAX_PARTITIONS_PER_TOPIC` | `0` (unlimited) | Maximum partitions emitted per topic. Payload cap only for the offset listings — kadm's `List*Offsets` take topic names, so the broker computes every partition regardless — but it does shrink the `DescribeLogDirs` request, whose partitions are named on the wire. |
-| `MAX_GROUPS` | `0` (unlimited) | Maximum consumer groups per batch. Enforced once, on the shared `ListGroups` result, so it shrinks the `DescribeGroups` and `OffsetFetch` fan-out **and truncates the `offsets` section as well as `groups`**. |
-| `MAX_OFFSETS_PER_GROUP` | `0` (unlimited) | Maximum committed offsets emitted per group. |
 
-No cap adds an ACL requirement, and none adds a request. `MAX_TOPICS` and `MAX_GROUPS`
-strictly *reduce* what is asked for, `MAX_PARTITIONS_PER_TOPIC` does so for the log-dirs
-request alone, and `MAX_OFFSETS_PER_GROUP` only trims the payload. There is no cap on
-members: the list is bounded by the consumers you actually run, and `DescribeGroups`
-returns every one of them whatever the agent does with the answer.
+**Nothing caps the inventory.** There is no `MAX_TOPICS`, no `MAX_GROUPS`, no per-parent
+entity cap of any kind, and that is deliberate: a batch either describes everything it was
+pointed at or a section says why it could not, with no third state where the payload
+quietly describes part of a cluster as though it were the whole one. A cap could only ever
+keep an arbitrary prefix of a sorted list — which 100 of your 5000 topics? the first 100
+alphabetically, and a different 100 next week — so it answers a question nobody asks in
+those terms.
+
+What a deployment does not want to watch is said in the filters above, which is a decision
+written down rather than a dice roll, shrinks the same broker requests a cap would have,
+and travels with the data in `selection` so the far end knows what it is looking at.
 
 ### Kafka authentication
 
@@ -594,22 +596,25 @@ occurrence only — the full affected set is still recoverable from the per-enti
 blast radius from `len(errors)` will under-count.** `sections[].error_count` is how many
 entries in `errors[]` bear that section's name — also not an occurrence count.
 
-**6. The presence of `truncation` means the batch is incomplete.**
-Its absence means complete. It is readable at three levels:
+**6. `truncation` is about `errors[]`, and `selection` is about coverage.**
+They answer two different questions, and neither is a status downgrade — `status` is
+collection health.
 
-* **batch** — `truncation.{topics,partitions,groups,offsets,errors_collapsed,errors_dropped}`:
-  can a cluster-wide aggregate be computed from this batch at all?
-* **section** — `sections[].truncated`, `sections[].errors_collapsed`,
-  `sections[].errors_dropped`: which phase is short?
-* **entity** — `topics[].partition_count`, `groups[].member_count` and
-  `offsets[].offset_count` are always the **true, pre-truncation** counts, so
-  `len(list) < count` is self-describing.
+`truncation` is present only when `errors[]` is short: `errors_collapsed` counts
+occurrences folded into an exemplar's `count` (nothing is lost), `errors_dropped` counts
+entries `MAX_ERRORS` refused outright (those are lost). `sections[].truncated` says which
+phase is affected, and is also raised by the agent's own internal fan-out bounds — the
+epoch-probe cap, the 1000-partition reassignment query — which are constants, not settings.
 
-`errors_collapsed` counts occurrences folded into an exemplar's `count` — nothing is lost.
-`errors_dropped` counts entries a cap refused outright — those are lost. `limits` echoes
-the caps in force, so "the cluster has 40 topics" is distinguishable from "the agent was
-told to ship 40"; it is absent when every entity cap is unlimited. Truncation is **not** a
-status downgrade: `status` is collection health, `truncated` is emission policy.
+Entity lists are never short. `topics[].partition_count`, `groups[].member_count` and
+`offsets[].offset_count` always equal `len(list)`; a mismatch is a sender bug and the mock
+ingest fails it as one.
+
+`selection` answers "is this the whole cluster?" It echoes the filters in force —
+`topic_include`, `topic_exclude`, `group_include`, `group_exclude`, `group_states`,
+`include_internal_topics` — and is **absent when nothing is filtered**, which is the only
+positive signal that the batch covers everything. Filtering leaves no other trace: an
+excluded topic is simply not there, with no counter anywhere saying it existed.
 
 ### Log directories
 

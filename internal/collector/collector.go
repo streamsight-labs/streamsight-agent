@@ -257,11 +257,10 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		cluster      *metrics.ClusterMetrics
 		topicDetails kadm.TopicDetails
 
-		groupIDs      []string
-		groupTypes    map[string]string
-		groupsDropped int
-		listErr       error
-		listStart     time.Time
+		groupIDs   []string
+		groupTypes map[string]string
+		listErr    error
+		listStart  time.Time
 
 		topics  []metrics.TopicMetrics
 		groups  []metrics.GroupMetrics
@@ -308,13 +307,13 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 	go func() {
 		defer close(groupsListed)
 		listStart = time.Now()
-		groupIDs, groupTypes, groupsDropped, listErr = c.listGroups(ctx)
+		groupIDs, groupTypes, listErr = c.listGroups(ctx)
 	}()
 
 	go func() {
 		defer wg.Done()
 		<-groupsListed
-		groups, groupsSec = c.collectGroups(ctx, groupIDs, groupTypes, groupsDropped, listErr, listStart)
+		groups, groupsSec = c.collectGroups(ctx, groupIDs, groupTypes, listErr, listStart)
 	}()
 
 	// Committed offsets. Must complete before either ceiling — the last stable
@@ -325,7 +324,7 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		defer close(committedDone)
 		<-metaDone
 		<-groupsListed
-		offsets, offsetsSec = c.collectOffsets(ctx, groupIDs, groupsDropped, listErr, internalTopics(topicDetails))
+		offsets, offsetsSec = c.collectOffsets(ctx, groupIDs, listErr, internalTopics(topicDetails))
 	}()
 
 	// The server-measured window. It runs in parallel with the start offsets,
@@ -434,7 +433,7 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		epochSec,
 		logDirsSec, reassignSec, topicCfgSec, brokerCfgSec, shareSec, rpcSec,
 	}
-	c.finalize(batch, secs, groupsDropped)
+	c.finalize(batch, secs)
 
 	c.log.Debug("collected batch",
 		"duration_ms", batch.CollectionMs,
@@ -461,13 +460,10 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 // errors.go — because that is the order errors and sections are emitted in.
 // Every one is present on every cycle, skipped or not: a missing section and an
 // empty one mean different things.
-func (c *Collector) finalize(batch *metrics.Batch, secs []*section, groupsDropped int) {
+func (c *Collector) finalize(batch *metrics.Batch, secs []*section) {
 	batch.Errors, _ = mergeErrors(secs, c.limits.MaxErrors)
 
-	// Counted once, here: MaxGroups is enforced once in listGroups and shortens
-	// the groups and offsets sections by the same set, so counting it per
-	// section would double it.
-	trunc := metrics.Truncation{Groups: groupsDropped}
+	var trunc metrics.Truncation
 	for _, s := range secs {
 		batch.Sections = append(batch.Sections, s.finish())
 		if s != nil {
@@ -478,9 +474,7 @@ func (c *Collector) finalize(batch *metrics.Batch, secs []*section, groupsDroppe
 	if trunc != (metrics.Truncation{}) {
 		batch.Truncation = &trunc
 	}
-	if c.limits.any() {
-		batch.Limits = c.limits.wire()
-	}
+	batch.Selection = c.opts.selection()
 }
 
 // Phase offsets, so the cadenced phases never sample on the same cycle.

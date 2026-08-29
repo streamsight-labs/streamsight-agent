@@ -225,12 +225,8 @@ func collectorOptions(cfg *config.Config, logger *slog.Logger) collector.Options
 		CollectEpochProbes:   true,
 
 		Limits: collector.Limits{
-			MaxErrors:             cfg.MaxErrors,
-			MaxErrorSamples:       cfg.MaxErrorSamples,
-			MaxTopics:             cfg.MaxTopics,
-			MaxPartitionsPerTopic: cfg.MaxPartitionsPerTopic,
-			MaxGroups:             cfg.MaxGroups,
-			MaxOffsetsPerGroup:    cfg.MaxOffsetsPerGroup,
+			MaxErrors:       cfg.MaxErrors,
+			MaxErrorSamples: cfg.MaxErrorSamples,
 		},
 		Logger: logger,
 	}

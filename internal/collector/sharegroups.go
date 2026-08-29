@@ -64,13 +64,6 @@ func (c *Collector) collectShareGroups(ctx context.Context, types map[string]str
 	}
 	sort.Strings(ids)
 
-	keep, dropped := capLen(len(ids), c.limits.MaxGroups)
-	if dropped > 0 {
-		sec.dropped.Groups += dropped
-		sec.truncated = true
-	}
-	ids = ids[:keep]
-
 	described, err := c.client.Admin.DescribeShareGroups(ctx, ids...)
 	if !sec.request(apiShareGroupDescribe, err) && len(described) == 0 {
 		return nil, sec

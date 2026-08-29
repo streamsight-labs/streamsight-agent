@@ -223,9 +223,10 @@ lifetime, so the `GROUP_STATES` check, every optional phase's capability gate an
   `windowDone`, `committedDone`, `endDone`. Eleven are in the `WaitGroup`; the twelfth is the
   `ListGroups` publisher, which signals by closing `groupsListed` rather than by `wg.Done`.
 * `ListGroups` runs once per cycle and its result feeds `groups`, `offsets` and
-  `share_groups`, so those sections can never disagree about which groups exist. `MAX_GROUPS`
-  is enforced there and nowhere else, which is why it truncates all of them. `share_groups`
-  reads the raw response for its `GroupType` filter — the same broadcast, not a second one.
+  `share_groups`, so those sections can never disagree about which groups exist. The
+  `GROUP_INCLUDE_REGEX`/`GROUP_EXCLUDE_REGEX` filter is applied there and nowhere else, which
+  is why it narrows all of them together. `share_groups` reads the raw response for its
+  `GroupType` filter — the same broadcast, not a second one.
 * `log_dirs`, `topics_window`, `topic_configs` and `broker_configs` share one process-local
   0-based cycle counter (`collector.go:282-289`), so a fresh agent samples each on its first
   cycle rather than N intervals in. A crash-looping agent therefore samples every cycle; that

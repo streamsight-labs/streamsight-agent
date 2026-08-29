@@ -101,18 +101,6 @@ data:
   # deliberate choice rather than an absent one.
   MAX_ERRORS: {{ .Values.limits.maxErrors | int | quote }}
   MAX_ERROR_SAMPLES: {{ .Values.limits.maxErrorSamples | int | quote }}
-  {{- if .Values.limits.maxTopics }}
-  MAX_TOPICS: {{ .Values.limits.maxTopics | int | quote }}
-  {{- end }}
-  {{- if .Values.limits.maxPartitionsPerTopic }}
-  MAX_PARTITIONS_PER_TOPIC: {{ .Values.limits.maxPartitionsPerTopic | int | quote }}
-  {{- end }}
-  {{- if .Values.limits.maxGroups }}
-  MAX_GROUPS: {{ .Values.limits.maxGroups | int | quote }}
-  {{- end }}
-  {{- if .Values.limits.maxOffsetsPerGroup }}
-  MAX_OFFSETS_PER_GROUP: {{ .Values.limits.maxOffsetsPerGroup | int | quote }}
-  {{- end }}
 
   # -- Agent --------------------------------------------------------------
   LOG_LEVEL: {{ .Values.agent.logLevel | quote }}

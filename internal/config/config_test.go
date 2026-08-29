@@ -53,10 +53,6 @@ var allKeys = []string{
 	"COLLECT_SHARE_GROUPS",
 	"MAX_ERRORS",
 	"MAX_ERROR_SAMPLES",
-	"MAX_TOPICS",
-	"MAX_PARTITIONS_PER_TOPIC",
-	"MAX_GROUPS",
-	"MAX_OFFSETS_PER_GROUP",
 	"LOG_LEVEL",
 	"AGENT_INSTANCE_ID",
 }
@@ -505,10 +501,6 @@ func TestLoadDefaults(t *testing.T) {
 		{"MaxErrors", cfg.MaxErrors, DefaultMaxErrors},
 		{"MaxErrorSamples", cfg.MaxErrorSamples, DefaultMaxErrorSamples},
 		// 0 = unlimited; see DefaultMaxEntities.
-		{"MaxTopics", cfg.MaxTopics, 0},
-		{"MaxPartitionsPerTopic", cfg.MaxPartitionsPerTopic, 0},
-		{"MaxGroups", cfg.MaxGroups, 0},
-		{"MaxOffsetsPerGroup", cfg.MaxOffsetsPerGroup, 0},
 		{"LogLevel", cfg.LogLevel, "info"},
 		{"ExportTarget", cfg.ExportTarget(), DefaultExportFile},
 	}
@@ -672,15 +664,10 @@ func TestLoadCapValidation(t *testing.T) {
 		wantErr string
 	}{
 		{name: "negative errors", env: base(map[string]string{"MAX_ERRORS": "-1"}), wantErr: "MAX_ERRORS must be >= 0"},
-		{name: "negative topics", env: base(map[string]string{"MAX_TOPICS": "-1"}), wantErr: "MAX_TOPICS must be >= 0"},
-		{name: "negative partitions", env: base(map[string]string{"MAX_PARTITIONS_PER_TOPIC": "-1"}), wantErr: "MAX_PARTITIONS_PER_TOPIC must be >= 0"},
-		{name: "negative groups", env: base(map[string]string{"MAX_GROUPS": "-1"}), wantErr: "MAX_GROUPS must be >= 0"},
-		{name: "negative offsets", env: base(map[string]string{"MAX_OFFSETS_PER_GROUP": "-1"}), wantErr: "MAX_OFFSETS_PER_GROUP must be >= 0"},
-		{name: "bad integer", env: base(map[string]string{"MAX_GROUPS": "many"}), wantErr: "MAX_GROUPS"},
+		{name: "bad integer", env: base(map[string]string{"MAX_ERRORS": "many"}), wantErr: "MAX_ERRORS"},
 		{name: "zero samples", env: base(map[string]string{"MAX_ERROR_SAMPLES": "0"}), wantErr: "MAX_ERROR_SAMPLES must be >= 1"},
 		{name: "negative samples", env: base(map[string]string{"MAX_ERROR_SAMPLES": "-1"}), wantErr: "MAX_ERROR_SAMPLES must be >= 1"},
 		{name: "zero errors means unlimited", env: base(map[string]string{"MAX_ERRORS": "0"})},
-		{name: "zero entity caps mean unlimited", env: base(map[string]string{"MAX_TOPICS": "0", "MAX_GROUPS": "0"})},
 		{name: "one sample is legal", env: base(map[string]string{"MAX_ERROR_SAMPLES": "1"})},
 	}
 
@@ -701,16 +688,14 @@ func TestLoadCapValidation(t *testing.T) {
 
 func TestLoadReportsEveryCapProblemAtOnce(t *testing.T) {
 	setEnv(t, base(map[string]string{
-		"MAX_ERRORS":            "-1",
-		"MAX_ERROR_SAMPLES":     "0",
-		"MAX_TOPICS":            "-2",
-		"MAX_OFFSETS_PER_GROUP": "-3",
+		"MAX_ERRORS":        "-1",
+		"MAX_ERROR_SAMPLES": "0",
 	}))
 	_, err := Load()
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	for _, want := range []string{"MAX_ERRORS", "MAX_ERROR_SAMPLES", "MAX_TOPICS", "MAX_OFFSETS_PER_GROUP"} {
+	for _, want := range []string{"MAX_ERRORS", "MAX_ERROR_SAMPLES"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing %q: %v", want, err)
 		}
@@ -961,20 +946,6 @@ func snakeCase(s string) string {
 }
 
 func TestCapWarnings(t *testing.T) {
-	t.Run("entity caps warn once each and MAX_GROUPS names the offsets section", func(t *testing.T) {
-		setEnv(t, base(map[string]string{"MAX_TOPICS": "100", "MAX_GROUPS": "50"}))
-		cfg, err := Load()
-		if err != nil {
-			t.Fatalf("Load: %v", err)
-		}
-		w := strings.Join(cfg.Warnings(), "\n")
-		for _, want := range []string{"MAX_TOPICS=100", "MAX_GROUPS=50", "MAX_GROUPS also truncates the offsets section"} {
-			if !strings.Contains(w, want) {
-				t.Errorf("warnings missing %q: %s", want, w)
-			}
-		}
-	})
-
 	t.Run("unbounded errors warn", func(t *testing.T) {
 		setEnv(t, base(map[string]string{"MAX_ERRORS": "0"}))
 		cfg, err := Load()
@@ -1009,18 +980,22 @@ func TestCapWarnings(t *testing.T) {
 	})
 }
 
-func TestRedactedShowsOnlySetCaps(t *testing.T) {
-	setEnv(t, base(map[string]string{"MAX_GROUPS": "50"}))
+func TestRedactedShowsTheErrorCaps(t *testing.T) {
+	setEnv(t, base(nil))
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	s := cfg.Redacted()
-	if !strings.Contains(s, "max_errors=1000") || !strings.Contains(s, "max_groups=50") {
+	if !strings.Contains(s, "max_errors=1000") || !strings.Contains(s, "max_error_samples=1") {
 		t.Errorf("redacted output missing the caps in force: %s", s)
 	}
-	if strings.Contains(s, "max_topics=") {
-		t.Errorf("redacted output prints an unlimited cap: %s", s)
+	// The entity caps are gone: no setting shortens the inventory, so no key
+	// here may suggest one does.
+	for _, gone := range []string{"max_topics=", "max_partitions_per_topic=", "max_groups=", "max_offsets_per_group="} {
+		if strings.Contains(s, gone) {
+			t.Errorf("redacted output prints %q, but no such cap exists: %s", gone, s)
+		}
 	}
 }
 
