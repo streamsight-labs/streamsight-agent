@@ -45,13 +45,26 @@ func TestSelectionPresenceMarksANarrowedView(t *testing.T) {
 	// the payload, so this block is the only thing that can tell a backend the
 	// batch is not the whole cluster.
 	m := marshalMap(t, Batch{SchemaVersion: SchemaVersion,
-		Selection: &Selection{TopicExclude: "^shadow-"}})
+		Selection: &Selection{TopicExclude: []string{"shadow.audit", "/^shadow-/"}}})
 	sel, ok := m["selection"].(map[string]any)
 	if !ok {
 		t.Fatalf("selection = %v, want an object", m["selection"])
 	}
-	if sel["topic_exclude"] != "^shadow-" {
-		t.Errorf("selection.topic_exclude = %v, want the configured pattern", sel["topic_exclude"])
+	// The entries travel exactly as configured -- a literal unescaped, a regex
+	// still wrapped -- because what the operator wrote is what a backend can
+	// show them and what they can diff against their own deployment.
+	got, ok := sel["topic_exclude"].([]any)
+	if !ok {
+		t.Fatalf("selection.topic_exclude = %v, want an array", sel["topic_exclude"])
+	}
+	want := []any{"shadow.audit", "/^shadow-/"}
+	if len(got) != len(want) {
+		t.Fatalf("selection.topic_exclude = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("selection.topic_exclude = %v, want %v", got, want)
+		}
 	}
 	if _, ok := sel["topic_include"]; ok {
 		t.Error("unset filters must be omitted")

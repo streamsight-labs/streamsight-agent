@@ -49,12 +49,24 @@ data:
   # Per-cycle deadline. Omitted, the agent derives 80% of the interval.
   # COLLECTION_TIMEOUT: "4s"
   INCLUDE_INTERNAL_TOPICS: "false"
-  # Filters. Empty or absent means match everything; exclude wins over
-  # include. Compiled at startup, so a bad pattern fails the pod.
-  # TOPIC_INCLUDE_REGEX: ""
-  # TOPIC_EXCLUDE_REGEX: "^_"
-  # GROUP_INCLUDE_REGEX: ""
-  # GROUP_EXCLUDE_REGEX: ""
+  # Filters. Each is a comma-separated list. An empty or absent list matches
+  # everything; a non-empty include list matches a name if ANY of its entries
+  # does; exclude wins over include, so a name matching both is dropped.
+  # An entry is a LITERAL name -- orders.events matches the topic called
+  # orders.events and nothing else -- unless it is wrapped in slashes, in which
+  # case the text between the slashes is a regular expression, left unanchored
+  # exactly as written: /orders/ also matches prod.orders, so add ^ and $
+  # yourself when you want them. Literals are the default because Kafka names
+  # are full of dots and "." is a regex wildcard: an exclude of orders.events
+  # must not silently take ordersXevents with it. Every entry is compiled at
+  # startup, so a malformed pattern fails the pod rather than the first
+  # collection cycle, and an empty "//" is rejected outright -- it would mean
+  # "match everything", which an empty list already says, so it is a typo.
+  # Write "/.*/" if you really mean it.
+  # TOPIC_INCLUDE: "orders.events,payments.v2"
+  # TOPIC_EXCLUDE: "__consumer_offsets,/-dlq$/"
+  # GROUP_INCLUDE: "/^svc-/"
+  # GROUP_EXCLUDE: "svc-canary"
   # Broker-side group-state filter: Unknown | PreparingRebalance |
   # CompletingRebalance | Stable | Dead | Empty, comma separated. The only
   # cardinality control applied before the response is built, so filtered
@@ -77,9 +89,9 @@ data:
   # days-to-full, per-topic storage and byte-rate-per-record all rest on it.
   # The response is O(replicas) = partitions x replication factor and is the
   # largest section emitted, which is what LOG_DIRS_EVERY is for. On a wide
-  # cluster narrow TOPIC_INCLUDE_REGEX/TOPIC_EXCLUDE_REGEX -- unlike the offset
-  # listings, the log-dir request names partitions explicitly, so the filter
-  # shrinks the request itself and not just the payload.
+  # cluster narrow TOPIC_INCLUDE/TOPIC_EXCLUDE -- unlike the offset listings,
+  # the log-dir request names partitions explicitly, so the filter shrinks the
+  # request itself and not just the payload.
   COLLECT_LOG_DIRS: "true"
   # Cadence for the log-dirs phase. Must be >= 1 (1 = every cycle). Unset uses
   # the agent default, currently 24 = every two minutes at the 5s interval.
@@ -105,7 +117,7 @@ data:
   # -- Error caps ---------------------------------------------------------
   # The only caps there are. Nothing shortens the inventory: a batch describes
   # every topic, partition, group and offset it was pointed at, or a section
-  # says why it could not. Use the regexes above to decide what to point it at.
+  # says why it could not. Use the filters above to decide what to point it at.
   #
   # MAX_ERRORS backstops errors[], which is deduplicated unconditionally, so
   # it essentially never fires. 0 = unlimited (and warns).

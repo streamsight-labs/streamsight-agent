@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"kafka-metrics-agent/internal/metrics"
@@ -776,12 +777,35 @@ func checkTruncation(c *checker, b *metrics.Batch) {
 		}
 	}
 
-	if s := b.Selection; s != nil && s.TopicInclude == "" && s.TopicExclude == "" &&
-		s.GroupInclude == "" && s.GroupExclude == "" &&
-		len(s.GroupStates) == 0 && !s.IncludeInternalTopics {
-		c.fail("selection.empty", "$.selection",
-			"selection block is present with every field empty; its presence is what says "+
-				"the batch covers less than the whole cluster")
+	if s := b.Selection; s != nil {
+		if len(s.TopicInclude) == 0 && len(s.TopicExclude) == 0 &&
+			len(s.GroupInclude) == 0 && len(s.GroupExclude) == 0 &&
+			len(s.GroupStates) == 0 && !s.IncludeInternalTopics {
+			c.fail("selection.empty", "$.selection",
+				"selection block is present with every field empty; its presence is what says "+
+					"the batch covers less than the whole cluster")
+		}
+		// An empty entry inside a list is a sender bug rather than a filter: the
+		// config splitter drops blanks, so one arriving here means the list was
+		// built some other way -- and an empty literal compiles to a pattern
+		// matching only the empty name, which no topic or group has.
+		for _, l := range []struct {
+			field   string
+			entries []string
+		}{
+			{"topic_include", s.TopicInclude},
+			{"topic_exclude", s.TopicExclude},
+			{"group_include", s.GroupInclude},
+			{"group_exclude", s.GroupExclude},
+		} {
+			for i, entry := range l.entries {
+				if strings.TrimSpace(entry) == "" {
+					c.fail("selection.empty_entry", fmt.Sprintf("$.selection.%s[%d]", l.field, i),
+						"selection entry is blank; every entry names a topic or group, "+
+							"literally or as a /regex/")
+				}
+			}
+		}
 	}
 
 	t := b.Truncation

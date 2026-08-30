@@ -45,7 +45,7 @@ func TestSelectTopicsAppliesBothFilters(t *testing.T) {
 		"staging.a":          {Topic: "staging.a"},
 		"staging.b":          {Topic: "staging.b"},
 	}
-	f, err := newFilter("^prod\\.", "")
+	f, err := newFilter([]string{"/^prod\\./"}, nil)
 	if err != nil {
 		t.Fatalf("newFilter: %v", err)
 	}

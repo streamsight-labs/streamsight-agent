@@ -387,7 +387,7 @@ func TestCollectTopicsAlwaysReturnsThreeSections(t *testing.T) {
 		{
 			name:       "filter selected no topics",
 			tds:        kadm.TopicDetails{"orders": {Topic: "orders"}},
-			opts:       Options{TopicIncludeRegex: "^nothing$"},
+			opts:       Options{TopicInclude: []string{"nothing"}},
 			wantTopics: metrics.SectionOK,
 		},
 	}

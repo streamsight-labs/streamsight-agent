@@ -12,8 +12,8 @@ import (
 // either all shipped or the section reports why it could not be completed --
 // there is deliberately no third state where a batch quietly describes part of
 // a cluster as though it were the whole one. What a deployment does NOT want to
-// watch is said in TOPIC_INCLUDE_REGEX and friends, which is a decision written
-// down rather than an arbitrary prefix of a sorted list.
+// watch is said in TOPIC_INCLUDE and friends, which is a decision written down
+// rather than an arbitrary prefix of a sorted list.
 type Limits struct {
 	// MaxErrors bounds Batch.Errors. Behind deduplication it essentially never
 	// fires: errors[] is already bounded by the number of distinct failure

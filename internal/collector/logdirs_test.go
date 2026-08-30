@@ -44,7 +44,7 @@ func TestCollectLogDirsSkippedPathsIssueNoRequest(t *testing.T) {
 		{name: "cluster metadata failed", opts: Options{CollectLogDirs: true}, tds: nil, run: true},
 		{
 			name: "filter matches nothing",
-			opts: Options{CollectLogDirs: true, TopicIncludeRegex: "^nothing$"},
+			opts: Options{CollectLogDirs: true, TopicInclude: []string{"nothing"}},
 			tds:  tds,
 			run:  true,
 		},
@@ -102,7 +102,7 @@ func TestLogDirTopicsHonoursTheTopicFilter(t *testing.T) {
 	// joining bytes onto partition inventory gets rows with no join partner. The
 	// filter is also what bounds this request on the wire, since the log-dir
 	// request names every partition explicitly.
-	c := logDirCollector(t, Options{TopicExcludeRegex: "^b$"})
+	c := logDirCollector(t, Options{TopicExclude: []string{"b"}})
 	tds := kadm.TopicDetails{
 		"a": {Topic: "a", Partitions: kadm.PartitionDetails{0: {Partition: 0}, 1: {Partition: 1}, 2: {Partition: 2}}},
 		"b": {Topic: "b", Partitions: kadm.PartitionDetails{0: {Partition: 0}}},

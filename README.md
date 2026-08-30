@@ -264,14 +264,14 @@ configuration problems at once and exits non-zero — one restart per fix, not f
 | `COLLECTION_INTERVAL` | `5s` | Must parse and be > 0. The first cycle runs immediately, not after one interval. |
 | `COLLECTION_TIMEOUT` | 80% of `COLLECTION_INTERVAL` (`4s`) | Per-cycle deadline. Exceeding the interval is a startup warning, not an error. Note the interaction with metadata caching: kgo may serve cached metadata for up to half the interval (2.5s at the defaults), so a cycle that runs past that refetches part-way through instead of resolving every offset listing against one snapshot. |
 | `INCLUDE_INTERNAL_TOPICS` | `false` | Includes topics the broker flags internal (`__consumer_offsets`, `__transaction_state`) — the broker's own flag, not a name-prefix guess. |
-| `TOPIC_INCLUDE_REGEX` | `""` (all) | Compiled at startup; a bad pattern fails the process. |
-| `TOPIC_EXCLUDE_REGEX` | `""` | Exclude wins over include. |
-| `GROUP_INCLUDE_REGEX` | `""` | |
-| `GROUP_EXCLUDE_REGEX` | `""` | |
+| `TOPIC_INCLUDE` | `""` (all) | Comma-separated list, union: a topic is a candidate if any entry matches, and an empty list matches everything. An entry is a **literal** by default — `orders.events` matches the topic of exactly that name and nothing else, every dot included — or a **regex** when wrapped in slashes, `/^billing-/`, compiled from the text between them and left unanchored exactly as written, so `/orders/` also matches `prod.orders`. Every entry is compiled at startup, so a malformed pattern fails the process rather than the first collection cycle; `//` is rejected there too, since "match everything" is what an empty list already says and a slash pair with nothing in it is far likelier a typo — write `/.*/` if you mean it. |
+| `TOPIC_EXCLUDE` | `""` | Exclude wins over include: a topic matching both is dropped. `TOPIC_EXCLUDE=__consumer_offsets` drops that one topic; `TOPIC_EXCLUDE=/-dlq$/,/^tmp-/` drops the two shapes. Because a literal entry is escaped, excluding `orders.events` no longer takes `ordersXevents` with it. |
+| `GROUP_INCLUDE` | `""` (all) | Same form against the consumer group id. `GROUP_INCLUDE=/^svc-/` keeps every group whose id starts `svc-`. |
+| `GROUP_EXCLUDE` | `""` | `GROUP_EXCLUDE=svc-canary` drops exactly that group id, and drops it even when an include entry matched it. |
 | `GROUP_STATES` | `""` (all) | Comma-separated states the broker should list: `Unknown`, `PreparingRebalance`, `CompletingRebalance`, `Stable`, `Dead`, `Empty`. Case-insensitive; an unrecognised state fails startup. Filtered **broker-side**, so it shortens both `groups[]` and `offsets[]` and reports no truncation. **Requires Kafka 2.6+** (ListGroups v4, KIP-518): an older broker drops the filter on the wire and returns every group with no error, so startup probes `ApiVersions` on every broker and refuses to run if any is older. |
 | `COLLECT_LAST_STABLE_OFFSET` | `true` | Adds `partitions[].last_stable_offset` via `ListCommittedOffsets`, sampled between the committed offsets and the high watermarks. Leave it on: without it every `read_committed` consumer on a transactional topic reports permanent false lag. No new ACL; one extra `ListOffsets` fan-out per cycle. |
 | `COLLECT_CONSUMER_GROUPS` | `true` | Adds the KIP-848 fields — `groups[].group_epoch`, `assignment_epoch`, `assignor`, per-member `member_epoch` / `target_assignment` — via `ConsumerGroupDescribe`. It is the only way to see a new-protocol group at all: the classic describe returns one with empty join metadata and **no error**. Needs Kafka 4.0+; startup probes `ApiVersions` and disables it with a log line on an older cluster, so the cost there is one round trip, not a rejected request per cycle. No new ACL. |
-| `COLLECT_LOG_DIRS` | `true` | Adds the `log_dirs[]` section (per-broker, per-directory replica bytes and offline-disk detection) via `DescribeLogDirs`. On by default because it is the only source of per-replica disk bytes, and every storage question the product answers rests on it: days-to-full, per-topic chargeback, follower lag in bytes without JMX, JBOD imbalance, and the average record size that converts every record rate into a byte rate. No ACL beyond the `DESCRIBE` on `CLUSTER` already required, but the response is O(replicas) = partitions × replication factor, the largest payload the agent emits — which is what `LOG_DIRS_EVERY` is for. On a large cluster, narrow `TOPIC_INCLUDE_REGEX`/`TOPIC_EXCLUDE_REGEX` before running it at `LOG_DIRS_EVERY=1` — the log-dir request names every partition on the wire, so the filter shrinks the request itself. |
+| `COLLECT_LOG_DIRS` | `true` | Adds the `log_dirs[]` section (per-broker, per-directory replica bytes and offline-disk detection) via `DescribeLogDirs`. On by default because it is the only source of per-replica disk bytes, and every storage question the product answers rests on it: days-to-full, per-topic chargeback, follower lag in bytes without JMX, JBOD imbalance, and the average record size that converts every record rate into a byte rate. No ACL beyond the `DESCRIBE` on `CLUSTER` already required, but the response is O(replicas) = partitions × replication factor, the largest payload the agent emits — which is what `LOG_DIRS_EVERY` is for. On a large cluster, narrow `TOPIC_INCLUDE`/`TOPIC_EXCLUDE` before running it at `LOG_DIRS_EVERY=1` — the log-dir request names every partition on the wire, so the filter shrinks the request itself. |
 | `LOG_DIRS_EVERY` | `24` | Run the log-dirs phase every Nth cycle — two minutes at the default interval, because disks fill over hours. Must be >= 1 (`1` = every cycle); `0` is an error, not "every cycle". Ignored when `COLLECT_LOG_DIRS=false`. |
 | `COLLECT_THROUGHPUT_WINDOW` | `false` | Adds `throughput_window` and `partitions[].window` via `ListOffsetsAfterMilli`: the produce rate measured **by the broker**, and the only rate input in the batch that survives an agent restart or a missed cycle. Off by default because it adds a `ListOffsets` fan-out — two on a mostly-silent cluster — to every cycle it runs on. Needs ListOffsets v1 (Kafka 0.10.1+); startup disables it below that, where the broker answers with no timestamp at all and no error. No new ACL. |
 | `THROUGHPUT_WINDOW` | `5m` | How far back the window reaches. It earns its cost only when it is **wider than `COLLECTION_INTERVAL`**: inside one interval a backend can already difference two batches. Must be > 0. |
@@ -283,8 +283,18 @@ configuration problems at once and exits non-zero — one restart per fix, not f
 | `MAX_TIMESTAMP_EVERY` | `12` | Run the max-timestamp phase every Nth cycle — once a minute at the default interval. Must be >= 1. Cadenced for two independent reasons. **Broker cost**: `-3` is the only offset sentinel that is not O(1). `-1` and `-2` read `logEndOffset`/`logStartOffset`, numbers already in memory; `-3` makes the broker walk every local log segment comparing cached `maxTimestampSoFar`, then on Kafka 3.8+ do an index lookup and scan the winning batch. **Payload**: `partitions[].max_timestamp` is the largest single field the agent adds — measured 77.7 B/partition raw and **18.9% of the gzipped batch**, and gzip cannot fold it because each value is a distinct wide integer. The question it answers — "when was the last record written" — has a minutes-scale answer, so a 60s-stale figure costs nothing real. |
 | `CONFIGS_EVERY` | `360` | Run the config phases every Nth cycle. The slowest cadence in the agent: configs change when a human changes them. Must be >= 1. |
 
-Regexes are **unanchored**: `orders` also matches `prod.orders`. Write `^orders$` for
-an exact match. Group IDs beginning with `__` are always skipped.
+The four name filters share the one form above, and the reason the literal is the default
+rather than the pattern is worth stating: Kafka names are full of dots, `.` is a regex
+metacharacter, and under a bare pattern language an exclude of `orders.events` would
+quietly take `ordersXevents` with it — a filter dropping a topic nobody named, leaving no
+trace beyond a topic that is simply not there. Escaping and anchoring every literal is what
+makes that impossible rather than merely unlikely, and it is why
+`TOPIC_INCLUDE=orders.events,payments.v2` selects two topics and not a family of them.
+Reach for the slashes when you actually want a pattern, and put in the `^` and `$`
+yourself: what sits between them is compiled exactly as written. The one thing a slash-
+wrapped entry cannot contain is a comma, which the list splitter claims before the pattern
+compiler ever sees it; `/^(a|b)$/` is the way to write the alternation a `,` would have
+meant. Group IDs beginning with `__` are always skipped.
 
 Three collectors have no variable at all, because there is no cost to trade away and an
 off position only ever bought a blind spot. `reassignments[]` issues
@@ -310,11 +320,11 @@ filtered set is indistinguishable at the backend from a deleted one.
 
 ### Cardinality caps
 
-Hard ceilings on what one batch may contain. Every **entity** cap defaults to `0` =
-unlimited, because a non-zero default would be an untested guess that silently shortens the
-customer's own inventory on first deploy. Use `TOPIC_INCLUDE_REGEX`/`GROUP_INCLUDE_REGEX`
-for *intentional* selection; use these when you have measured the cluster and need a
-ceiling. Setting any of them logs a startup warning.
+Two ceilings, both on `errors[]`, and nothing else. Selection is not a cardinality
+question: use `TOPIC_INCLUDE`/`GROUP_INCLUDE` to decide what the agent is pointed at, and
+read these as the backstop against an error storm from a cluster that is misbehaving. Only
+`MAX_ERRORS=0` logs a startup warning, because that is the one setting that removes a
+ceiling rather than choosing one.
 
 | Variable | Default | Notes |
 |----------|---------|-------|
@@ -615,6 +625,20 @@ ingest fails it as one.
 `include_internal_topics` — and is **absent when nothing is filtered**, which is the only
 positive signal that the batch covers everything. Filtering leaves no other trace: an
 excluded topic is simply not there, with no counter anywhere saying it existed.
+
+The four name filters are arrays and carry their entries **verbatim as configured** — a
+literal unescaped, a regex still inside its slashes — so the far end reads the operator's
+intent rather than a normalized form it would have to unpick. Each field is omitted when
+its list is empty:
+
+```json
+"selection": {
+  "topic_include": ["orders.events", "/^billing-/"],
+  "topic_exclude": ["/-dlq$/"],
+  "group_states": ["Stable"],
+  "include_internal_topics": true
+}
+```
 
 ### Log directories
 

@@ -332,10 +332,10 @@ func TestCollectorOptionsCarryEveryConfiguredSetting(t *testing.T) {
 	cfg := &config.Config{
 		CollectionTimeout:     24 * time.Second,
 		IncludeInternalTopics: true,
-		TopicIncludeRegex:     "^orders",
-		TopicExcludeRegex:     "^orders-tmp",
-		GroupIncludeRegex:     "^svc-",
-		GroupExcludeRegex:     "^svc-canary",
+		TopicInclude:          []string{"/^orders/"},
+		TopicExclude:          []string{"/^orders-tmp/"},
+		GroupInclude:          []string{"/^svc-/"},
+		GroupExclude:          []string{"/^svc-canary/"},
 		GroupStates:           []string{"Stable", "Empty"},
 
 		CollectLastStableOffset: true,

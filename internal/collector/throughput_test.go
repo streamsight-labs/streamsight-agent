@@ -38,7 +38,7 @@ func TestCollectThroughputWindowSkippedPathsIssueNoRequest(t *testing.T) {
 	}{
 		{name: "not a window cycle", tds: tds, run: false},
 		{name: "cluster metadata failed", tds: nil, run: true},
-		{name: "filter matches nothing", opts: Options{TopicIncludeRegex: "^nothing$"}, tds: tds, run: true},
+		{name: "filter matches nothing", opts: Options{TopicInclude: []string{"nothing"}}, tds: tds, run: true},
 		{
 			name: "only internal topics exist and they are excluded",
 			tds:  kadm.TopicDetails{"__consumer_offsets": tds["__consumer_offsets"]},
