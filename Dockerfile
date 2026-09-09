@@ -25,7 +25,13 @@ ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/agent ./cmd/agent
 
-FROM alpine:3.19
+# A branch tag, not `latest` and not a digest: the patch level floats inside the
+# branch so a rebuild picks up the distribution's security fixes on its own,
+# while moving the branch stays a deliberate commit. The branch itself has to be
+# one Alpine still supports -- an end-of-life branch goes on building happily and
+# silently stops being patched, which is the failure this line is choosing
+# against. dependabot watches it.
+FROM alpine:3.24
 
 ARG VERSION=dev
 

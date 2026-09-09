@@ -5,8 +5,14 @@ on:
     tags:
       - 'v*'
 
+# Read at the top so every job starts with a token that cannot write, and the
+# one job that has to write asks for it on itself. The build matrix is five
+# runners compiling third-party module source, and none of them has any reason
+# to hold a token that can push to the default branch or cut a release; scoping
+# it here also means a job added to this file later inherits read rather than
+# write by accident.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -60,6 +66,10 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    # The only write in this workflow: action-gh-release creates the GitHub
+    # release object and attaches the binaries and SHA256SUMS to it.
+    permissions:
+      contents: write
     steps:
       # Only THIRD_PARTY_NOTICES.txt is wanted from the source tree, but it has
       # to be fetched before the artifacts are downloaded: actions/checkout

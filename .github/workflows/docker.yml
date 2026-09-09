@@ -67,11 +67,23 @@ jobs:
       # every exported batch as agent_version, so it has to be meaningful.
       - name: Resolve version
         id: version
+        # The ref reaches the script through the environment, never through
+        # `${{ }}` inside it. Expressions are substituted into the script text
+        # before a shell parses it, so an interpolated ref name is not a string
+        # to bash -- it is source code. And a ref name is far freer than it
+        # looks: `git check-ref-format` accepts `evil$(id)`, a backtick, and
+        # `a&&id` as branch and tag names alike, and `v$(...)` matches the `v*`
+        # tag filter above. Creating a ref here needs push access, so this is
+        # not a way in from outside, but it is the exact shape that becomes one
+        # the moment any workflow reads a ref an outsider controls.
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            version="${{ github.ref_name }}"
+          if [ "${REF_TYPE}" = "tag" ]; then
+            version="${REF_NAME}"
           else
-            version="${{ github.ref_name }}-$(git rev-parse --short HEAD)"
+            version="${REF_NAME}-$(git rev-parse --short HEAD)"
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "building version ${version}"

@@ -49,3 +49,25 @@ updates:
       actions:
         patterns:
           - "*"
+
+  # The base images. gomod watches the Go tree and github-actions watches the
+  # workflows, which leaves the one line deciding which libc and which set of
+  # distribution CVEs the published image carries subscribed to by neither. A
+  # branch tag builds forever: it simply stops receiving patches on the day that
+  # branch reaches end of life, with no failure anywhere to say so -- the only
+  # signal is a scanner somebody else points at the published image.
+  #
+  # Both Dockerfiles, because the test harness image drifting away from the
+  # shipped one is how the local reproduction stops reproducing.
+  #
+  # Monthly: base branches move on the distribution's calendar, not this repo's,
+  # and a weekly check would find nothing eleven times out of twelve.
+  - package-ecosystem: docker
+    directories:
+      - /
+      - /test
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build

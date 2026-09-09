@@ -20,7 +20,10 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build -trimpath -ldflags "-s -w" -o /out/mock-ingest ./cmd/mock-ingest
 
 # alpine rather than scratch so busybox wget can serve the compose healthcheck.
-FROM alpine:3.19
+# Held on the same supported branch as the runtime stage in ../Dockerfile: a
+# harness that reproduces against a different userland than the one that ships
+# is a harness that reproduces the wrong thing.
+FROM alpine:3.24
 
 COPY --from=builder /out/mock-ingest /usr/local/bin/mock-ingest
 
