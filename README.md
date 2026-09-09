@@ -1010,3 +1010,13 @@ Contributing conventions, the lint setup and the review checklist are in
 [CONTRIBUTING.md](CONTRIBUTING.md). Security issues go through [SECURITY.md](SECURITY.md),
 not a public issue.
 
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE). Copyright 2026 Streamsight Labs.
+
+The agent is statically linked, so a release binary and the container image are
+each a redistribution of every dependency as well as of the agent itself. All of
+those dependencies are BSD-3-Clause, whose binary clause asks that the copyright
+notices travel with the distribution rather than only with the source, so
+[THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) is attached to every release
+and copied into the image at `/usr/local/share/streamsight-agent`.

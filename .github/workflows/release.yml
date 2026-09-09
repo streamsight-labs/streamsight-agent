@@ -61,16 +61,32 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # Only THIRD_PARTY_NOTICES.txt is wanted from the source tree, but it has
+      # to be fetched before the artifacts are downloaded: actions/checkout
+      # cleans the workspace it checks out into and would take artifacts/ with
+      # it. This job builds nothing, so the clone costs a few seconds and no
+      # toolchain setup.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
           merge-multiple: true
 
+      # The notices join the binaries in artifacts/, which is what `files:`
+      # below globs, so they are attached to the release rather than left in a
+      # repository the person downloading a binary never visits. Every
+      # dependency linked into these binaries is BSD-3-Clause, whose second
+      # clause requires exactly that: the copyright notices reproduced "in the
+      # documentation and/or other materials provided with the distribution".
+      # They are checksummed alongside the binaries because a notice file that
+      # can be swapped without detection is not much of a notice.
       - name: Checksums
         run: |
+          cp THIRD_PARTY_NOTICES.txt artifacts/
           cd artifacts
-          sha256sum streamsight-agent-* > SHA256SUMS
+          sha256sum streamsight-agent-* THIRD_PARTY_NOTICES.txt > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create Release

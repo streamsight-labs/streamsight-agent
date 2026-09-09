@@ -18,3 +18,9 @@
 !go.sum
 !cmd
 !internal
+
+# Not needed to compile anything: the final stage copies it next to the binary
+# so the BSD-3-Clause notices its dependencies require travel inside the image
+# and not only in the repository. Being below the `*` above, it has to be
+# allowed back in explicitly or `COPY` in the Dockerfile fails outright.
+!THIRD_PARTY_NOTICES.txt
