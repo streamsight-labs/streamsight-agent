@@ -42,10 +42,9 @@ func (l Limits) perSectionErrorBudget() int {
 	return l.MaxErrors
 }
 
-// capLen returns how many of n elements to keep and how many are dropped. A
-// ceiling of zero or less means unlimited.
 // capLen bounds a slice against a ceiling from a CONSTANT -- the epoch-probe
-// fan-out is the only caller left. No operator setting reaches it.
+// fan-out is the only caller left. No operator setting reaches it. A ceiling of
+// zero or less means unlimited.
 func capLen(n, ceiling int) (keep, dropped int) {
 	if ceiling <= 0 || n <= ceiling {
 		return n, 0

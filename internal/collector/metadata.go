@@ -386,7 +386,6 @@ func replicationFactor(parts []kadm.PartitionDetail) int {
 	return lowest
 }
 
-// topicListed reports whether the listing contains the topic at all.
 func topicListed(sec *section, api string, listed kadm.ListedOffsets, topic string) bool {
 	if _, ok := listed[topic]; ok {
 		return true
