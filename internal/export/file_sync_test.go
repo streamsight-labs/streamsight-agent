@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 func seqIn(t *testing.T, path string) []uint64 {

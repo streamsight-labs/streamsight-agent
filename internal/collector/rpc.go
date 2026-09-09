@@ -1,6 +1,6 @@
 package collector
 
-import "kafka-metrics-agent/internal/metrics"
+import "github.com/streamsight-labs/streamsight-agent/internal/metrics"
 
 // collectRPC detaches the counters the kgo hooks accumulated since the previous
 // cycle: per-broker latency, bytes, connect failures and quota throttling,

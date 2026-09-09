@@ -7,7 +7,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kadm"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 func urpTopic(name string, replicas, isr []int32) metrics.TopicMetrics {

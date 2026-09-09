@@ -43,10 +43,6 @@ const (
 	DefaultExportMaxRetries = 3
 	DefaultExportBaseDelay  = time.Second
 	DefaultExportTimeout    = 10 * time.Second
-	// DefaultExportEndpoint is the hosted ingest path. Self-hosted and on-prem
-	// deployments override it; the agent POSTs to this URL verbatim and appends
-	// no path of its own, so the route is a decision on the receiving side.
-	DefaultExportEndpoint = "https://ingestion.streamsight.cloud/v1/batches"
 
 	// DefaultInterval is 5s because that is the polling cadence the product
 	// sells on every plan. It used to be 30s, and every _EVERY default below was
@@ -325,13 +321,18 @@ func Load() (*Config, error) {
 	switch c.ExportMode {
 	case ExportModeFile, ExportModeStdout:
 	case ExportModeHTTP:
-		// Defaulted here rather than at the read above, and the placement is the
-		// whole point: EXPORT_MODE is inferred as http IFF an endpoint is set, so
-		// a default assigned earlier would flip every unconfigured agent from
-		// file mode into posting at production. Inside this case the operator has
-		// already chosen http, either explicitly or by setting an endpoint.
+		// There is no default endpoint, and the omission is deliberate. Http mode
+		// is inferred IFF an endpoint is set, so the only way to reach this branch
+		// with an empty one is to have written EXPORT_MODE=http by hand -- and any
+		// value compiled in for that case would be a guess at where this operator's
+		// receiver lives. A wrong guess does not fail: the agent starts, reports a
+		// target it was never told about, and then burns its retry budget on a
+		// host that was never going to answer, once per batch, forever. Refusing to
+		// start says the same thing in one line, at the only moment anyone is
+		// watching. Every deployment has to name its own receiver anyway, because
+		// the URL is POSTed verbatim and the route is the receiving side's decision.
 		if c.ExportEndpoint == "" {
-			c.ExportEndpoint = DefaultExportEndpoint
+			p.errf("EXPORT_ENDPOINT is required when EXPORT_MODE=http")
 		}
 		if c.APIKey == "" {
 			p.errf("API_KEY is required when EXPORT_MODE=http")

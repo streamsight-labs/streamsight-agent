@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // All three exporters must satisfy the interface the agent depends on.

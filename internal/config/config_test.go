@@ -164,10 +164,12 @@ func TestLoadRequiredFieldMatrix(t *testing.T) {
 			wantErr: "API_KEY is required when EXPORT_MODE=http",
 		},
 		{
-			// No longer an error: http mode defaults the endpoint. The API key
-			// stays required, so an agent cannot post anywhere without one.
-			name: "http mode defaults the endpoint",
-			env:  base(map[string]string{"EXPORT_MODE": "http", "API_KEY": "k"}),
+			// Reachable only by writing EXPORT_MODE=http by hand, because the
+			// mode is otherwise inferred from the endpoint being present. There
+			// is nothing to fall back to, so it is an error rather than a guess.
+			name:    "http mode needs an endpoint",
+			env:     base(map[string]string{"EXPORT_MODE": "http", "API_KEY": "k"}),
+			wantErr: "EXPORT_ENDPOINT is required when EXPORT_MODE=http",
 		},
 		{
 			name: "http mode fully specified",
@@ -1071,11 +1073,12 @@ func TestRedactedShowsTheErrorCaps(t *testing.T) {
 	}
 }
 
-// The endpoint default is applied inside http mode, never before it. Assigned
-// earlier it would make ExportEndpoint always non-empty, and EXPORT_MODE is
-// inferred as http IFF an endpoint is set -- so every agent started with no
-// configuration at all would silently begin POSTing at production.
-func TestEndpointDefaultCannotFlipAnUnconfiguredAgentIntoHTTPMode(t *testing.T) {
+// An agent given nothing but brokers writes to a local file. There is no
+// compiled-in endpoint for it to fall back to, so there is no configuration
+// under which it can start posting somewhere nobody named -- and http mode
+// without an endpoint is refused at startup rather than retried per batch
+// against a host the operator never chose.
+func TestUnconfiguredAgentNeverPostsAnywhere(t *testing.T) {
 	setEnv(t, map[string]string{"KAFKA_BROKERS": "localhost:9092"})
 	cfg, err := Load()
 	if err != nil {
@@ -1089,12 +1092,10 @@ func TestEndpointDefaultCannotFlipAnUnconfiguredAgentIntoHTTPMode(t *testing.T) 
 	}
 
 	setEnv(t, map[string]string{"KAFKA_BROKERS": "localhost:9092", "EXPORT_MODE": "http", "API_KEY": "k"})
-	cfg, err = Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.ExportEndpoint != DefaultExportEndpoint {
-		t.Errorf("ExportEndpoint = %q, want the default %q", cfg.ExportEndpoint, DefaultExportEndpoint)
+	if _, err := Load(); err == nil {
+		t.Error("Load succeeded with EXPORT_MODE=http and no EXPORT_ENDPOINT, want an error")
+	} else if !strings.Contains(err.Error(), "EXPORT_ENDPOINT is required when EXPORT_MODE=http") {
+		t.Errorf("Load error = %v, want it to name the missing EXPORT_ENDPOINT", err)
 	}
 }
 

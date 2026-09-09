@@ -10,8 +10,8 @@ import (
 	"runtime"
 	"runtime/debug"
 
-	"kafka-metrics-agent/internal/agent"
-	"kafka-metrics-agent/internal/config"
+	"github.com/streamsight-labs/streamsight-agent/internal/agent"
+	"github.com/streamsight-labs/streamsight-agent/internal/config"
 )
 
 // version is injected at build time via

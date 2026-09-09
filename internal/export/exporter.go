@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // Mode selects an exporter implementation. It aliases string so a config field

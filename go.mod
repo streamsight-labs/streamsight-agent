@@ -1,4 +1,4 @@
-module kafka-metrics-agent
+module github.com/streamsight-labs/streamsight-agent
 
 go 1.25.0
 

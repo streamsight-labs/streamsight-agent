@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"kafka-metrics-agent/internal/collector"
-	"kafka-metrics-agent/internal/config"
-	"kafka-metrics-agent/internal/export"
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/collector"
+	"github.com/streamsight-labs/streamsight-agent/internal/config"
+	"github.com/streamsight-labs/streamsight-agent/internal/export"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // fakeExporter records what the agent hands it and reports whatever Stats the

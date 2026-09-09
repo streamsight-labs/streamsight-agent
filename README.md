@@ -9,6 +9,14 @@ entire permission requirement is `DESCRIBE` on `CLUSTER`, `TOPIC` and `GROUP`, p
 `DESCRIBE_CONFIGS` on `TOPIC` and `CLUSTER`. All five are read-only; `DESCRIBE_CONFIGS`
 reads configuration and is not `ALTER_CONFIGS`.
 
+What that costs your brokers is knowable before you run it, which matters because this
+polls a production cluster on a 5s default cadence: roughly `4·L + 3·B` Admin requests per
+cycle at the defaults (`L` leader brokers, `B` brokers), with the heavier phases on their
+own multi-cycle cadences and every collector's price stated on its own row under
+[Configuration](#configuration). The per-phase budget is in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#request-budget-per-cycle), and
+[Output](#output) is a real batch.
+
 ## How it works
 
 ```mermaid
@@ -133,6 +141,12 @@ and the request budget.
 
 ## Quick start (no endpoint, no API key)
 
+You need a Go toolchain to build — `go.mod` declares 1.25, and under the default
+`GOTOOLCHAIN=auto` any Go 1.21 or newer fetches that toolchain itself, so the floor only
+bites under `GOTOOLCHAIN=local` — plus Docker if you take the `docker compose` path at the
+end of this section, and `jq` for the sample commands. The agent itself needs none of them
+at runtime.
+
 The default export mode is a local JSONL file — one JSON object per line, one line per
 cycle, logs on stderr. Nothing else is required:
 
@@ -246,7 +260,7 @@ configuration problems at once and exits non-zero — one restart per fix, not f
 | Variable | Default | Required when | Notes |
 |----------|---------|---------------|-------|
 | `EXPORT_MODE` | `http` if `EXPORT_ENDPOINT` is set, else `file` | — | `file` \| `http` \| `stdout`. Any other value is an error. |
-| `EXPORT_ENDPOINT` | `https://ingestion.streamsight.cloud/v1/batches` | http mode | Full URL that batches are POSTed to, **verbatim** — the agent appends no path, so the route is the receiver's decision. The default is applied only once http mode is chosen: assigned earlier it would flip an unconfigured agent out of file mode and into posting at production, because `EXPORT_MODE` is inferred as `http` iff an endpoint is set. |
+| `EXPORT_ENDPOINT` | — | `EXPORT_MODE=http` | Full URL that batches are POSTed to, **verbatim** — the agent appends no path, so the route is the receiver's decision. There is deliberately no default: setting this is what infers `http` mode in the first place, so the only agent that can reach http mode without an endpoint is one whose operator wrote `EXPORT_MODE=http` by hand, and any URL compiled in for that case would be a guess at where *their* receiver lives. Missing, it is a startup error rather than a per-batch retry against a host nobody chose. |
 | `API_KEY` | — | `EXPORT_MODE=http` | Sent as `X-API-Key`. Never required in file/stdout mode. |
 | `EXPORT_FILE` | `./metrics.jsonl` (`/var/lib/streamsight/metrics.jsonl` in the image) | file mode | Parent directories are created. |
 | `EXPORT_FILE_MAX_MB` | `100` | file mode | `0` uses the 100MB default; negative disables rotation. |
@@ -880,6 +894,18 @@ across separate releases if one agent is not enough. Neither carries a tag that 
 the chart defaults to `.Chart.AppVersion` and the manifests pin `:latest`, and both are
 release tags nothing has published. Pass `--set image.tag=main` to `helm install`, or
 `kubectl set image` after applying the manifests, until `v0.1.0` is tagged and promoted.
+
+```bash
+helm install streamsight charts/streamsight-agent \
+  --set kafka.brokers=<host:port> \
+  --set image.tag=main
+```
+
+`kafka.brokers` ships as `broker:9092`, which is a placeholder rather than a cluster, so it
+is the one value every install has to set. Every knob in [Configuration](#configuration)
+has a chart key of the same shape, each documented at its key in
+`charts/streamsight-agent/values.yaml`; swap `install` for `template` to print the
+manifests without creating anything.
 
 ## Local testing
 

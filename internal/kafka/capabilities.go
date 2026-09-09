@@ -8,7 +8,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kadm"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // unknownVersion is the placeholder for a broker that answered without a

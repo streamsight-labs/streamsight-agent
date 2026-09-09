@@ -3,8 +3,8 @@ package collector
 import (
 	"testing"
 
-	"kafka-metrics-agent/internal/kafka"
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/kafka"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // There is no switch for this phase, so the only way it reports nothing is a

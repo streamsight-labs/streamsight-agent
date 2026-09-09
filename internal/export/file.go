@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 const (

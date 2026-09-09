@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"kafka-metrics-agent/internal/mockingest"
+	"github.com/streamsight-labs/streamsight-agent/internal/mockingest"
 )
 
 func main() {

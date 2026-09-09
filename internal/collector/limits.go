@@ -3,7 +3,7 @@ package collector
 import (
 	"math"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // Limits bounds errors[], and nothing else.

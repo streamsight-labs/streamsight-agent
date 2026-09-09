@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // filter is an include+exclude pair of compiled selection lists. A nil *filter,

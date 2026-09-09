@@ -13,7 +13,7 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/plain"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 
-	"kafka-metrics-agent/internal/config"
+	"github.com/streamsight-labs/streamsight-agent/internal/config"
 )
 
 const (

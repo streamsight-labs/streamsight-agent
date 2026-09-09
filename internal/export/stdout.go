@@ -7,7 +7,7 @@ import (
 	"os"
 	"sync"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // StdoutExporter writes the same JSONL framing as FileExporter to stdout, for

@@ -1,7 +1,9 @@
 # Contributing
 
 Small repo, one maintainer, short rules. Read them once and you will not need
-to come back.
+to come back. Behaviour in issues and reviews is covered by
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), which is the Contributor Covenant and
+holds no surprises.
 
 ## Before you push
 

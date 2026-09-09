@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // knownErrorKinds mirrors the kind* constants in internal/collector/errors.go.
