@@ -16,12 +16,11 @@ import (
 // shared by the groups and offsets phases. The error is returned rather than
 // recorded so each consuming section can attribute it to itself.
 //
-// MaxGroups is enforced here and nowhere else. One enforcement point shrinks
-// both the DescribeGroups and the FetchManyOffsets fan-out, and guarantees
-// groups[] and offsets[] describe the SAME set of groups; capping independently
-// in each phase would let the two sections disagree about which groups exist —
-// a data integrity bug, not a payload one. listed.Sorted() makes the retained
-// prefix the same set every cycle.
+// The group filters are applied here and nowhere else. One filtering point
+// shrinks both the DescribeGroups and the FetchManyOffsets fan-out, and
+// guarantees groups[] and offsets[] describe the SAME set of groups; filtering
+// independently in each phase would let the two sections disagree about which
+// groups exist — a data integrity bug, not a payload one.
 func (c *Collector) listGroups(ctx context.Context) (ids []string, types map[string]string, err error) {
 	listed, types, err := c.listGroupsWithTypes(ctx)
 
@@ -96,7 +95,7 @@ func (c *Collector) collectGroups(ctx context.Context, ids []string, types map[s
 		return nil, sec
 	}
 
-	described, err := c.client.Admin.DescribeGroups(ctx, ids...)
+	described, err := c.client.DescribeGroups(ctx, ids...)
 	// A shard failure still returns the groups whose coordinators answered.
 	if !sec.request("DescribeGroups", err) && len(described) == 0 {
 		return nil, sec
@@ -207,7 +206,7 @@ func (c *Collector) enrichConsumerGroups(ctx context.Context, sec *section, grou
 		ids = append(ids, g.ID)
 	}
 
-	described, err := c.client.Admin.DescribeConsumerGroups(ctx, ids...)
+	described, err := c.client.DescribeConsumerGroups(ctx, ids...)
 	// kadm aborts a whole shard on the first GROUP_AUTHORIZATION_FAILED, so one
 	// denied group would otherwise discard every other group's epochs.
 	if !sec.requestPartial("ConsumerGroupDescribe", err, len(described) > 0) {

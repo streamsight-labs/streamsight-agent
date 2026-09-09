@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 	"time"
 )
@@ -316,6 +317,55 @@ func TestLatencyHistogramIsAggregatable(t *testing.T) {
 	}
 	if total != h.Count {
 		t.Errorf("buckets sum to %d, want Count = %d", total, h.Count)
+	}
+}
+
+// TestHistogramsDoNotShareBucketBounds pins the isolation EnsureBuckets exists
+// to provide: a histogram may only ever be re-bucketed through itself.
+//
+// EnsureBuckets assigned the package-level default slice straight into
+// h.BoundsUs, so every histogram the agent emitted -- one per broker row and two
+// per API row, installed fresh by internal/kafka's snapshot on every cycle --
+// aliased ONE backing array. A single element write through any one of them
+// moved the layout for all of them, for every histogram created afterwards, and
+// for every batch after that. The payload gave no sign of it: bounds_us still
+// shipped, counts still summed to count, and the only symptom was a backend
+// interpolating against bounds the observations were never bucketed by.
+func TestHistogramsDoNotShareBucketBounds(t *testing.T) {
+	var a, b LatencyHistogram
+	a.EnsureBuckets()
+	b.EnsureBuckets()
+	want := slices.Clone(b.BoundsUs)
+
+	a.BoundsUs[0] = 999_999_999
+
+	if !slices.Equal(b.BoundsUs, want) {
+		t.Errorf("a write through one histogram re-bucketed another: %v, want %v", b.BoundsUs, want)
+	}
+	var c LatencyHistogram
+	c.EnsureBuckets()
+	if !slices.Equal(c.BoundsUs, want) {
+		t.Errorf("a histogram created after the write inherited the mutated layout: %v, want %v", c.BoundsUs, want)
+	}
+	// The untouched histogram must still BUCKET by the untouched layout, not
+	// merely report it. Observe walks h.BoundsUs, so a moved first bound would
+	// have swallowed every observation below it into bucket 0.
+	b.Observe(600 * time.Microsecond)
+	if b.Counts[1] != 1 {
+		t.Errorf("600us landed in %v, want the second bucket of the default layout", b.Counts)
+	}
+}
+
+// TestDefaultLatencyBoundsUsHandsOutCopies covers the other half of the same
+// invariant. The accessor is the only way the layout leaves this package, so it
+// must not hand out its source: a caller that stored the bounds once per batch
+// and then normalised or sorted them in place would otherwise move the agent's
+// buckets for the rest of the process.
+func TestDefaultLatencyBoundsUsHandsOutCopies(t *testing.T) {
+	got := DefaultLatencyBoundsUs()
+	got[0] = -1
+	if again := DefaultLatencyBoundsUs(); again[0] == -1 {
+		t.Errorf("the accessor handed out its source: %v", again)
 	}
 }
 

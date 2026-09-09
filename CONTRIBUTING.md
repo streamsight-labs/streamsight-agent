@@ -65,29 +65,38 @@ The whole history follows this. `git log --oneline` is the reference.
 
 ## The ACL invariant
 
-The agent requires exactly `DESCRIBE` on `CLUSTER`, `TOPIC`, and `GROUP`. It
+The agent requires exactly five read-only grants: `DESCRIBE` on `CLUSTER`, on
+`TOPIC` and on `GROUP`, plus `DESCRIBE_CONFIGS` on `TOPIC` and on `CLUSTER`. It
 never reads record data and never writes to the cluster. That is not a
 description of the current implementation — it is the product, and it is what
 `SECURITY.md` promises to the people who decide whether this binary may run
-against their production Kafka.
+against their production Kafka. `DESCRIBE_CONFIGS` is read-only and is not
+`ALTER_CONFIGS`; it is in the set because `cleanup.policy` is the only thing that
+identifies a compacted topic, where consumer lag is otherwise overstated by an
+unknowable amount with nothing flagging it as unreliable.
 
-**A change that requires a fourth ACL is a product decision. Open an issue
+**A change that requires a sixth ACL is a product decision. Open an issue
 first.** It will not be merged as part of a feature PR, however good the
 feature is. Two candidate collectors are already parked on exactly this
 question.
 
-If you are unsure whether a new Admin API call stays inside the three grants,
+If you are unsure whether a new Admin API call stays inside those grants,
 `test/` brings up a local KRaft cluster with SASL/SCRAM and `StandardAuthorizer`
-enforcing precisely that set:
+enforcing the three `DESCRIBE`s and nothing else:
 
 ```bash
 make test-local-up
-make test-local-logs      # every section should report ok
+make test-local-logs      # every section reports ok or skipped, except the two
+                          # config sections, which this environment deliberately
+                          # does not grant and which report unauthorized on the
+                          # cycles they sample
 make test-local-down
 ```
 
 Revoking one grant and watching a single section turn `unauthorized` while the
 others stay `ok` is the fastest way to prove an attribution change works.
+`make test-local-urp` does the same for `reassignments`, which needs an
+under-replicated partition before it issues a request at all.
 
 ## Pull requests
 

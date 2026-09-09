@@ -13,7 +13,7 @@ the level below them.
 | `internal/config` | env-only loader; validates everything at startup and reports **all** problems at once. `Warnings()` covers legal-but-suspicious settings |
 | `internal/agent` | lifecycle: ticker, per-cycle deadline, batch envelope, self-telemetry, graceful shutdown. Also owns the two startup decisions — `applyCapabilityGates`, which phases this cluster can serve, and `collectorOptions`, a named function rather than a literal so a test can prove every setting actually reaches the collector |
 | `internal/kafka` | one `kgo.Client` wrapped in `kadm.Client`; SASL PLAIN/SCRAM, TLS; retry and metadata-age tuning. `capabilities.go` = the cached ApiVersions fingerprint (per-key floors, always the **minimum** across brokers) and its wire shape; `hooks.go` = the `kgo` broker hooks that accumulate the RPC window; `client.go` also exposes `Request` / `RequestSharded`, the raw-kmsg escape hatch for the protocol fields kadm decodes and then drops — `ListGroups` v5's `GroupType` and `DescribeLogDirs` v4's `TotalBytes`/`UsableBytes` |
-| `internal/collector` | the phases. `errors.go` = section names and their wire order, section/error machinery, `limits.go` = caps, dedup keys and admission priority, `filter.go` = the topic and group name filters, and the entry convention they compile (a literal unless slash-wrapped). `metadata.go` / `groups.go` / `offsets.go` / `logdirs.go` / `throughput.go` / `configs.go` / `sharegroups.go` / `reassign.go` / `truncation.go` / `rpc.go` = phases. Two of those files are not one phase each: `metadata.go` owns `cluster` **and** the whole six-section offset chain, because the chain is one ordered sequence and splitting it would put the ordering constraint across a file boundary; `configs.go` owns two, because `DESCRIBE_CONFIGS` is granted separately on `TOPIC` and on `CLUSTER` and a principal holding one and not the other has to see one section `ok` and the other `unauthorized` |
+| `internal/collector` | the phases. `errors.go` = section names and their wire order, section/error machinery, `limits.go` = the two `errors[]` ceilings, the dedup key and the admission priority that decides which errors survive one, `filter.go` = the topic and group name filters, and the entry convention they compile (a literal unless slash-wrapped). `metadata.go` / `groups.go` / `offsets.go` / `logdirs.go` / `throughput.go` / `configs.go` / `sharegroups.go` / `reassign.go` / `truncation.go` / `rpc.go` = phases. Two of those files are not one phase each: `metadata.go` owns `cluster` **and** the whole six-section offset chain, because the chain is one ordered sequence and splitting it would put the ordering constraint across a file boundary; `configs.go` owns two, because `DESCRIBE_CONFIGS` is granted separately on `TOPIC` and on `CLUSTER` and a principal holding one and not the other has to see one section `ok` and the other `unauthorized` |
 | `internal/metrics` | `types.go` — the wire contract |
 | `internal/export` | `exporter.go` (interface + factory), `file.go`, `stdout.go`, `http.go` |
 | `internal/mockingest` | conformance-checking mock ingest with deterministic fault injection |
@@ -117,8 +117,9 @@ Those arrows are not all alike, and the difference is what a capacity estimate t
   partition or an error code all leave it open, because those three are exactly what a leader
   election in flight produces.
 * Both triggered phases read the batch's own `topics[]`/`offsets[]` rather than raw metadata,
-  so every row they emit has a join partner in the same batch — and a partition dropped by a
-  cap is never asked about.
+  so every row they emit has a join partner in the same batch. Nothing shortens those two
+  lists, so "in the batch" and "in the cluster the agent was pointed at" are the same set, and
+  a probe can never name a partition the payload does not carry.
 
 `log_dirs` has two request paths behind one arrow: raw kmsg `DescribeLogDirs` **v4** via
 `Client.RequestSharded` when every broker serves it, `kadm.DescribeAllLogDirs` below that.
@@ -227,12 +228,19 @@ lifetime, so the `GROUP_STATES` check, every optional phase's capability gate an
   `GROUP_INCLUDE`/`GROUP_EXCLUDE` filter is applied there and nowhere else, which
   is why it narrows all of them together. `share_groups` reads the raw response for its
   `GroupType` filter — the same broadcast, not a second one.
-* `log_dirs`, `topics_window`, `topic_configs` and `broker_configs` share one process-local
-  0-based cycle counter (`collector.go:282-289`), so a fresh agent samples each on its first
-  cycle rather than N intervals in. A crash-looping agent therefore samples every cycle; that
-  is accepted, and visible at the backend as `agent_instance_id` churn. The two config
-  sections read one flag, `runCfg`, so they are always sampled together — a principal holding
-  one grant and not the other sees the split, not a cadence skew.
+* `log_dirs`, `topics_max_timestamp`, `topic_configs`, `broker_configs` and `topics_window`
+  share one process-local 0-based cycle counter (`collector.go:289-298`), and each carries a
+  constant offset into it (`collector.go:506-513`). The offsets exist because the shipped
+  periods divide one another — 12, 24, 360 — so without them every configs cycle would also be
+  a log-dirs cycle and a max-timestamp cycle, stacking the largest response, the slowest
+  request and the only segment-walking `ListOffsets` into one collection budget, and landing on
+  the same cycle across a fleet started together. The chosen offsets are pairwise disjoint at
+  the defaults, which `TestCadencedPhasesNeverCoincide` proves by exhaustion over a full
+  period. The price is that a phase first samples a few cycles in rather than on cycle 0 —
+  max-timestamp on cycle 10, configs on cycle 355 — and the same property read the other way is
+  that a crash-looping agent no longer re-issues every expensive phase on every restart. The
+  two config sections read one flag, `runCfg`, so they are always sampled together — a
+  principal holding one grant and not the other sees the split, not a cadence skew.
 * Section errors are merged, deduplicated and capped once, after all phases have joined, on
   a single goroutine — a shared budget would make the surviving set depend on scheduling.
 * `broker_rpc` runs **after** `wg.Wait()`, which is what makes the RPC window cover this

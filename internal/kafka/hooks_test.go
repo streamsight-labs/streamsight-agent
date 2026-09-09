@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -103,8 +104,8 @@ func TestSnapshotHistogramIsDecomposable(t *testing.T) {
 	h.OnBrokerE2E(meta(1), metadataKey, e2e(10*time.Second, 0, 0, 0, 1, 1))       // overflow
 
 	hist := findAPI(t, findBroker(t, h.snapshot(epoch.Add(time.Second)), 1), metrics.APIKeyMetadata).E2E
-	if len(hist.BoundsUs) != len(metrics.DefaultLatencyBoundsUs) {
-		t.Fatalf("BoundsUs = %v, want the default layout", hist.BoundsUs)
+	if want := metrics.DefaultLatencyBoundsUs(); !slices.Equal(hist.BoundsUs, want) {
+		t.Fatalf("BoundsUs = %v, want the default layout %v", hist.BoundsUs, want)
 	}
 	if len(hist.Counts) != len(hist.BoundsUs)+1 {
 		t.Fatalf("Counts = %d entries, want %d", len(hist.Counts), len(hist.BoundsUs)+1)

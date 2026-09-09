@@ -60,7 +60,7 @@ func (c *Collector) collectReassignments(ctx context.Context, topics []metrics.T
 		return nil, sec
 	}
 
-	listed, err := c.client.Admin.ListPartitionReassignments(ctx, set)
+	listed, err := c.client.ListPartitionReassignments(ctx, set)
 	// One request to one broker, the controller: there are no shards that could
 	// leave a partial result behind, and kadm returns a nil map with every
 	// error, so requestPartial would have nothing to keep.

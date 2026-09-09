@@ -14,7 +14,13 @@ image:
   # Published by .github/workflows/docker.yml as ghcr.io/<owner>/<repo>.
   repository: ghcr.io/streamsight-labs/streamsight-agent
   pullPolicy: IfNotPresent
-  # Defaults to .Chart.AppVersion.
+  # Empty defaults to .Chart.AppVersion. NO RELEASE HAS BEEN TAGGED YET, so that
+  # default names an image GHCR does not have: docker.yml publishes the version
+  # tag only from a v<version> git tag, and promote.yml moves :latest and the
+  # floating :MAJOR.MINOR only after that. Until v0.1.0 is cut, override this
+  # with a tag that exists -- `--set image.tag=main` for the head of main, or
+  # `--set image.tag=sha-<short>` to pin one commit, which is what a real
+  # deployment should be doing in any case.
   tag: ""
 
 imagePullSecrets: []

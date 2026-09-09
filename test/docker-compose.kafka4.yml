@@ -1,0 +1,178 @@
+# Apache Kafka 4.1 (KRaft), the two group protocols no older broker can serve, and
+# the agent watching all three kinds of group at once.
+#
+#   make test-kafka4        # broker, share.version=1, traffic, three consumers, agent
+#   make test-kafka4-logs   # follow the agent's stderr and its JSON batches
+#   make test-kafka4-down   # stop and delete the volumes
+#
+# Every other environment in this repo runs confluentinc/cp-kafka 7.5.0, which is
+# Kafka 3.5 and advertises neither ConsumerGroupDescribe (KIP-848, API key 69) nor
+# ShareGroupDescribe (KIP-932, API key 77). The capability probe correctly disables
+# both phases there, which is why only their DEGRADATION path was ever exercised.
+# This file exists to run the other one.
+#
+# What Kafka 4.1 actually requires, established by running it rather than assumed:
+#
+#   * KIP-848 requires nothing. group.version's finalized level is 1 on a freshly
+#     formatted 4.1 cluster, so a client asking for group.protocol=consumer gets a
+#     new-protocol group with no broker configuration at all.
+#   * KIP-932 is OFF by default. share.version is finalized at 0 on a fresh cluster
+#     even though the broker advertises ShareGroupDescribe in ApiVersions, so the
+#     capability probe says "supported" while no share group can exist.
+#     setup-kafka4.sh raises the feature with `kafka-features upgrade`: the
+#     apache/kafka image formats its own storage inside KafkaDockerWrapper and
+#     offers no way to pass `kafka-storage format --feature`.
+#   * share.coordinator.state.topic.replication.factor defaults to 3 and its
+#     min.isr to 2, which one broker cannot satisfy, and the failure is SILENT: the
+#     share group forms, its group and member epochs advance, and every member is
+#     assigned zero partitions with no start offsets and no error anywhere. Both
+#     are overridden below.
+#
+# group.coordinator.rebalance.protocols is deliberately NOT overridden. 4.1 serves
+# share groups off the feature flag alone, with the stock classic,consumer,streams
+# list; setting it would be a knob paying for nothing. unstable.api.versions.enable
+# is not needed either.
+#
+# The broker is published on localhost:39092 -- not 9092 and not 19092 -- so this
+# runs beside the repo-root broker, beside the SASL environment, and beside a Khaos
+# cluster. The compose project is named for the same reason: these targets run from
+# test/, and without a name they would share the "test" project with
+# docker-compose.yml, where `down -v` would take the level-3 stack with it.
+name: streamsight-kafka4
+
+services:
+  kafka:
+    image: apache/kafka:4.1.0
+    hostname: kafka
+    container_name: streamsight-kafka4
+    ports:
+      # EXTERNAL, for host-side tools and for `KAFKA_BROKERS=localhost:39092
+      # ./bin/kafka-metrics-agent`. In-cluster clients use kafka:29092.
+      - "39092:39092"
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,EXTERNAL://0.0.0.0:39092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:39092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+      # The share-group state topic, without which a share group is assigned
+      # nothing and says nothing about why. See the header.
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/29092'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  # Raises share.version to 1 and creates the topic. Everything else waits on it
+  # completing, so no consumer can join before the feature that lets it exist.
+  kafka-init:
+    image: apache/kafka:4.1.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./setup-kafka4.sh:/setup-kafka4.sh:ro
+    environment:
+      BOOTSTRAP_SERVER: kafka:29092
+    command: ["/bin/bash", "/setup-kafka4.sh"]
+
+  # Continuous traffic. It is not decoration: a share group's start offsets stay
+  # uninitialised ("-" in kafka-share-groups --describe, and absent from the wire)
+  # until a share consumer actually fetches records, and share consumers start at
+  # the end of the log, so records produced before they joined do not count.
+  producer:
+    image: apache/kafka:4.1.0
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    command:
+      - /bin/bash
+      - -c
+      - |
+        while true; do
+          for i in $$(seq 1 50); do echo "key$$i:value-$$i"; done
+          sleep 2
+        done | /opt/kafka/bin/kafka-console-producer.sh \
+          --bootstrap-server kafka:29092 --topic orders \
+          --property parse.key=true --property key.separator=:
+    restart: unless-stopped
+
+  # One group of each kind, in one cluster, so a single batch carries the contrast.
+  # Records go to /dev/null: the consumed values are noise, while stderr -- where a
+  # client-side failure shows up -- is kept.
+  consumer-classic:
+    image: apache/kafka:4.1.0
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    command:
+      - /bin/bash
+      - -c
+      - |
+        exec /opt/kafka/bin/kafka-console-consumer.sh \
+          --bootstrap-server kafka:29092 --topic orders \
+          --group classic-consumers \
+          --consumer-property group.protocol=classic > /dev/null
+    restart: unless-stopped
+
+  consumer-new:
+    image: apache/kafka:4.1.0
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    command:
+      - /bin/bash
+      - -c
+      - |
+        exec /opt/kafka/bin/kafka-console-consumer.sh \
+          --bootstrap-server kafka:29092 --topic orders \
+          --group modern-consumers \
+          --consumer-property group.protocol=consumer > /dev/null
+    restart: unless-stopped
+
+  consumer-share:
+    image: apache/kafka:4.1.0
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    command:
+      - /bin/bash
+      - -c
+      - |
+        exec /opt/kafka/bin/kafka-console-share-consumer.sh \
+          --bootstrap-server kafka:29092 --topic orders \
+          --group share-workers > /dev/null
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKERS: kafka:29092
+      # COLLECT_SHARE_GROUPS defaults off because no broker outside a 4.x cluster
+      # can answer it. This is that cluster.
+      COLLECT_SHARE_GROUPS: "true"
+      # stdout mode: batches show up in `docker compose logs agent` as one JSON
+      # object per line, agent logs on stderr, exactly as in docker-compose.yml.
+      EXPORT_MODE: stdout
+      COLLECTION_INTERVAL: 10s
+      LOG_LEVEL: debug
+    restart: unless-stopped

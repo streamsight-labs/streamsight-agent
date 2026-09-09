@@ -9,7 +9,6 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kadm"
 
-	"kafka-metrics-agent/internal/kafka"
 	"kafka-metrics-agent/internal/metrics"
 )
 
@@ -151,7 +150,7 @@ type Options struct {
 // returns an error: a cycle that fails in part still ships the parts that
 // worked, and reports what failed in Batch.Sections and Batch.Errors.
 type Collector struct {
-	client *kafka.Client
+	client clusterClient
 	opts   Options
 	topics *filter
 	groups *filter
@@ -169,7 +168,7 @@ type Collector struct {
 }
 
 // New builds a Collector. It fails only on a malformed filter regex.
-func New(client *kafka.Client, opts Options) (*Collector, error) {
+func New(client clusterClient, opts Options) (*Collector, error) {
 	topics, err := newFilter(opts.TopicInclude, opts.TopicExclude)
 	if err != nil {
 		return nil, err
@@ -287,8 +286,15 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		wg sync.WaitGroup
 	)
 
-	// The cycle counter is 0-based, so a freshly started agent samples every
-	// cadenced phase on its first cycle rather than N intervals in.
+	// The cycle counter is 0-based, and each cadenced phase adds its own
+	// constant offset before the modulo, so only the phase whose offset is zero
+	// (log dirs) samples on a fresh agent's first cycle. The staggered ones
+	// first sample at (every-offset) mod every — cycle 10 for max-timestamp,
+	// cycle 355 for the two config sections, at the shipped cadences. That is
+	// the point of the offsets rather than a cost of them: a crash-looping
+	// agent no longer re-issues every expensive phase on every restart. See the
+	// offset block near the bottom of this file for the proof they never
+	// coincide.
 	n := c.cycle.Add(1) - 1
 	var (
 		runWindow = runsThisCycle(c.opts.CollectThroughputWindow, c.opts.ThroughputWindowEvery, phaseWindow, n)
