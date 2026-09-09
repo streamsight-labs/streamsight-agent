@@ -14,7 +14,7 @@ func (c *Collector) collectCluster(ctx context.Context) (*metrics.ClusterMetrics
 	sec := c.newSection(sectionCluster)
 	defer sec.stop()
 
-	meta, err := c.client.Admin.Metadata(ctx)
+	meta, err := c.client.Metadata(ctx)
 	if !sec.request("Metadata", err) {
 		// Nil, not a zero struct: see metrics.Batch.Cluster. An empty
 		// ClusterMetrics would ship broker_count 0 as though it were measured.
@@ -116,7 +116,7 @@ func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, ru
 		names = append(names, td.Topic)
 	}
 
-	starts, err := c.client.Admin.ListStartOffsets(ctx, names...)
+	starts, err := c.client.ListStartOffsets(ctx, names...)
 	startsOK := sec.requestPartial("ListStartOffsets", err, len(starts) > 0)
 
 	for _, done := range before {
@@ -138,7 +138,7 @@ func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, ru
 		lsosOK bool
 	)
 	if c.opts.CollectLastStableOffset {
-		lsos, err = c.client.Admin.ListCommittedOffsets(ctx, names...)
+		lsos, err = c.client.ListCommittedOffsets(ctx, names...)
 		lsosOK = lsoSec.requestPartial("ListCommittedOffsets", err, len(lsos) > 0)
 	} else {
 		lsoSec.downgrade(metrics.SectionSkipped)
@@ -146,7 +146,7 @@ func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, ru
 	lsoSec.stop()
 
 	endSec := c.newSection(sectionTopicsEnd)
-	ends, err := c.client.Admin.ListEndOffsets(ctx, names...)
+	ends, err := c.client.ListEndOffsets(ctx, names...)
 	endsOK := endSec.requestPartial("ListEndOffsets", err, len(ends) > 0)
 	endSec.stop()
 
@@ -165,7 +165,7 @@ func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, ru
 	// still emitted on the cycles it skips, so "not sampled this cycle" and
 	// "sampled, the broker had nothing" stay different answers.
 	if runMaxTS {
-		maxTS, err = c.client.Admin.ListMaxTimestampOffsets(ctx, names...)
+		maxTS, err = c.client.ListMaxTimestampOffsets(ctx, names...)
 		maxTSOK = maxTSSec.requestPartial("ListMaxTimestampOffsets", err, len(maxTS) > 0)
 	} else {
 		maxTSSec.downgrade(metrics.SectionSkipped)
@@ -178,7 +178,7 @@ func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, ru
 		localsOK bool
 	)
 	if c.opts.CollectTieredOffsets {
-		locals, err = c.client.Admin.ListLocalLogStartOffsets(ctx, names...)
+		locals, err = c.client.ListLocalLogStartOffsets(ctx, names...)
 		localsOK = localSec.requestPartial("ListLocalLogStartOffsets", err, len(locals) > 0)
 	} else {
 		localSec.downgrade(metrics.SectionSkipped)
@@ -193,7 +193,7 @@ func (c *Collector) collectTopics(ctx context.Context, tds kadm.TopicDetails, ru
 		remotesOK bool
 	)
 	if c.opts.CollectTieredOffsets && c.opts.CollectLatestTiered {
-		remotes, err = c.client.Admin.ListLatestRemoteOffsets(ctx, names...)
+		remotes, err = c.client.ListLatestRemoteOffsets(ctx, names...)
 		remotesOK = remoteSec.requestPartial("ListLatestRemoteOffsets", err, len(remotes) > 0)
 	} else {
 		remoteSec.downgrade(metrics.SectionSkipped)

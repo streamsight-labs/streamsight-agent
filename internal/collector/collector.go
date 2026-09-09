@@ -9,7 +9,6 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kadm"
 
-	"kafka-metrics-agent/internal/kafka"
 	"kafka-metrics-agent/internal/metrics"
 )
 
@@ -151,7 +150,7 @@ type Options struct {
 // returns an error: a cycle that fails in part still ships the parts that
 // worked, and reports what failed in Batch.Sections and Batch.Errors.
 type Collector struct {
-	client *kafka.Client
+	client clusterClient
 	opts   Options
 	topics *filter
 	groups *filter
@@ -169,7 +168,7 @@ type Collector struct {
 }
 
 // New builds a Collector. It fails only on a malformed filter regex.
-func New(client *kafka.Client, opts Options) (*Collector, error) {
+func New(client clusterClient, opts Options) (*Collector, error) {
 	topics, err := newFilter(opts.TopicInclude, opts.TopicExclude)
 	if err != nil {
 		return nil, err

@@ -72,7 +72,7 @@ func (c *Collector) collectThroughputWindow(ctx context.Context, tds kadm.TopicD
 	}
 
 	window := throughputWindow(time.Now(), width)
-	listed, err := c.client.Admin.ListOffsetsAfterMilli(ctx, window.RequestedMs, names...)
+	listed, err := c.client.ListOffsetsAfterMilli(ctx, window.RequestedMs, names...)
 	// The window is returned even when the request failed: it states what this
 	// cycle asked about, which is true whatever the brokers answered.
 	if !sec.requestPartial(windowAPI, err, len(listed) > 0) {

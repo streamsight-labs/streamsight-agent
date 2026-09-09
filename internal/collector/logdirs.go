@@ -88,7 +88,7 @@ func (c *Collector) describeLogDirs(ctx context.Context, set kadm.TopicsSet) (lo
 	if c.supportsLogDirVolumeBytes(ctx) {
 		return logDirShards(c.client.RequestSharded(ctx, describeLogDirsRequest(set)))
 	}
-	described, err := c.client.Admin.DescribeAllLogDirs(ctx, set)
+	described, err := c.client.DescribeAllLogDirs(ctx, set)
 	// Converted even on error: kadm returns the brokers that did answer
 	// alongside a *ShardErrors, and discarding them would blank a cluster over
 	// one dead broker.

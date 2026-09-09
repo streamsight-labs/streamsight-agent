@@ -42,10 +42,28 @@ const (
 
 // Client is one kgo client wrapped in a kadm admin client. The agent holds
 // exactly one for its lifetime; kgo maintains the per-broker connections.
+//
+// The kadm client is EMBEDDED rather than held in a named field, and that is a
+// testability decision rather than a stylistic one. The collector's whole view
+// of a cluster is an interface it declares itself (collector.clusterClient), and
+// an interface cannot describe a field: with an `Admin *kadm.Client` field the
+// phases reach through a concrete type, so Collect could only ever run against a
+// real broker -- which is why the offset chain's sampling order, the one thing
+// in this agent that is a correctness constraint rather than a preference, went
+// unasserted for so long. An `Admin()` accessor would not have helped either:
+// Go has no covariant return, so it could only hand back *kadm.Client, and
+// declaring its return type as an interface would have to put that interface in
+// this package, which is the wrong end of the dependency.
+//
+// Nothing becomes reachable that was not already: the field was exported, so
+// every kadm method -- CreateTopics and DeleteTopics included -- compiled from
+// outside this package before. Embedding removes a dot, not a guard rail. Close
+// is the one name both types carry, and this Client's own Close shadows kadm's
+// at depth 0, which is what keeps shutdown going through kgo exactly once.
 type Client struct {
-	kgo   *kgo.Client
-	Admin *kadm.Client
-	rpc   *rpcHooks
+	kgo *kgo.Client
+	*kadm.Client
+	rpc *rpcHooks
 
 	mu   sync.Mutex
 	caps *Capabilities
@@ -103,9 +121,9 @@ func NewClient(cfg *config.Config, version string) (*Client, error) {
 	}
 
 	return &Client{
-		kgo:   client,
-		Admin: kadm.NewClient(client),
-		rpc:   rpc,
+		kgo:    client,
+		Client: kadm.NewClient(client),
+		rpc:    rpc,
 	}, nil
 }
 
@@ -143,14 +161,15 @@ func (c *Client) Close() {
 // Ping proves the cluster is reachable and the credentials work, so a
 // misconfiguration surfaces at startup instead of as a failed section.
 func (c *Client) Ping(ctx context.Context) error {
-	_, err := c.Admin.BrokerMetadata(ctx)
+	_, err := c.BrokerMetadata(ctx)
 	return err
 }
 
 // Request issues a raw kmsg request. It exists for the protocol fields kadm
 // drops — DescribeLogDirs v4's TotalBytes/UsableBytes, Metadata v8's
 // AuthorizedOperations — not as a general bypass: anything kadm already models
-// goes through Admin, which handles sharding, retries and error merging.
+// goes through the embedded kadm client, which handles sharding, retries and
+// error merging.
 func (c *Client) Request(ctx context.Context, req kmsg.Request) (kmsg.Response, error) {
 	return c.kgo.Request(ctx, req)
 }
@@ -178,7 +197,7 @@ func (c *Client) Probe(ctx context.Context) (*Capabilities, error) {
 	if c.caps != nil {
 		return c.caps, nil
 	}
-	versions, err := c.Admin.ApiVersions(ctx)
+	versions, err := c.ApiVersions(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("probe broker api versions: %w", err)
 	}

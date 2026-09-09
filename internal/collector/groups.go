@@ -96,7 +96,7 @@ func (c *Collector) collectGroups(ctx context.Context, ids []string, types map[s
 		return nil, sec
 	}
 
-	described, err := c.client.Admin.DescribeGroups(ctx, ids...)
+	described, err := c.client.DescribeGroups(ctx, ids...)
 	// A shard failure still returns the groups whose coordinators answered.
 	if !sec.request("DescribeGroups", err) && len(described) == 0 {
 		return nil, sec
@@ -207,7 +207,7 @@ func (c *Collector) enrichConsumerGroups(ctx context.Context, sec *section, grou
 		ids = append(ids, g.ID)
 	}
 
-	described, err := c.client.Admin.DescribeConsumerGroups(ctx, ids...)
+	described, err := c.client.DescribeConsumerGroups(ctx, ids...)
 	// kadm aborts a whole shard on the first GROUP_AUTHORIZATION_FAILED, so one
 	// denied group would otherwise discard every other group's epochs.
 	if !sec.requestPartial("ConsumerGroupDescribe", err, len(described) > 0) {

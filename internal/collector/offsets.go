@@ -22,7 +22,7 @@ func (c *Collector) collectOffsets(ctx context.Context, ids []string, listErr er
 
 	// FetchManyOffsets never returns a top-level error; every failure is
 	// attributed to a group in the response.
-	fetched := c.client.Admin.FetchManyOffsets(ctx, ids...)
+	fetched := c.client.FetchManyOffsets(ctx, ids...)
 
 	result := make([]metrics.ConsumerOffset, 0, len(fetched))
 	for _, id := range ids {

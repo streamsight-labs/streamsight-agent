@@ -64,7 +64,7 @@ func (c *Collector) collectShareGroups(ctx context.Context, types map[string]str
 	}
 	sort.Strings(ids)
 
-	described, err := c.client.Admin.DescribeShareGroups(ctx, ids...)
+	described, err := c.client.DescribeShareGroups(ctx, ids...)
 	if !sec.request(apiShareGroupDescribe, err) && len(described) == 0 {
 		return nil, sec
 	}
@@ -72,7 +72,7 @@ func (c *Collector) collectShareGroups(ctx context.Context, types map[string]str
 	// Offsets are a second request and are allowed to fail on their own: a
 	// described group with no start offsets is still worth shipping, and
 	// StartOffsets being empty is covered by the section status.
-	offsets, offErr := c.client.Admin.DescribeShareGroupOffsets(ctx, ids...)
+	offsets, offErr := c.client.DescribeShareGroupOffsets(ctx, ids...)
 	if offErr != nil {
 		sec.requestPartial(apiDescribeShareGroupOffsets, offErr, len(described) > 0)
 	}

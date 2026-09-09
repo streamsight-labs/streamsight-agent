@@ -122,7 +122,7 @@ func (c *Collector) collectTopicConfigs(ctx context.Context, topics []metrics.To
 		return nil, sec
 	}
 
-	described, err := c.client.Admin.DescribeTopicConfigs(ctx, names...)
+	described, err := c.client.DescribeTopicConfigs(ctx, names...)
 	// Shard errors keep the topics that did answer: one topic this principal may
 	// not describe must not blank out the configs of every other.
 	if !sec.request(apiDescribeTopicConfigs, err) && len(described) == 0 {
@@ -169,7 +169,7 @@ func (c *Collector) collectBrokerConfigs(ctx context.Context, cluster *metrics.C
 		return nil, sec
 	}
 
-	described, err := c.client.Admin.DescribeBrokerConfigs(ctx, ids...)
+	described, err := c.client.DescribeBrokerConfigs(ctx, ids...)
 	if !sec.request(apiDescribeBrokerConfigs, err) && len(described) == 0 {
 		return nil, sec
 	}

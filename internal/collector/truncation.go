@@ -146,7 +146,7 @@ func (c *Collector) collectEpochProbes(ctx context.Context, run bool, topics []m
 
 	asked := make(map[epochKey]epochAnswer, len(triggers))
 	for _, round := range rounds {
-		resp, err := c.client.Admin.OffsetForLeaderEpoch(ctx, round.req)
+		resp, err := c.client.OffsetForLeaderEpoch(ctx, round.req)
 		// kadm aborts the whole response on the first partition-level
 		// authorization failure while keeping the topics it had already decoded,
 		// and a shard failure leaves the leaders that did answer in the map.
