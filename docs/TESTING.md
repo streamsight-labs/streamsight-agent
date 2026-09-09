@@ -8,7 +8,7 @@ time; after that, run the level that matches what you changed.
 | [1. Unit tests](#1-unit-tests) | Go toolchain | Logic, the wire contract, the schema shape |
 | [2. One broker](#2-one-broker-no-auth) | Docker | It talks to a real Kafka and produces batches |
 | [3. The permission model](#3-the-permission-model-sasl--acls) | Docker | It works inside the ACLs the product promises |
-| [4. HTTP export](#4-http-export-against-the-conformance-mock) | Docker | The export path, and ~100 conformance checks per batch |
+| [4. HTTP export](#4-http-export-against-the-conformance-mock) | Docker | The export path, and ~80 conformance checks per batch |
 | [5. Multi-broker under load](#5-multi-broker-under-load-and-failure-khaos) | Docker + [Khaos](https://github.com/aleksandarskrbic/khaos) | Payload size at real cardinality, and the trigger-driven phases |
 | [6. Kafka 4.x](#6-kafka-4x-the-two-group-protocols-no-older-broker-can-serve) | Docker | The KIP-848 and KIP-932 paths every other level gates off |
 
@@ -80,12 +80,25 @@ jq -r '.sections[] | "\(.name)\t\(.status)\t\(.duration_ms)ms"' metrics.jsonl | 
 # anything that went wrong, most frequent first
 jq -c 'select(.errors) | .errors[]' metrics.jsonl | sort | uniq -c | sort -rn
 
-# was anything dropped by a cap?
+# errors[] is the only thing that can be short; absent means nothing was dropped
 jq -c 'select(.truncation)' metrics.jsonl
 ```
 
 All seventeen sections appear in **every** batch, in a fixed order, with `status: "skipped"`
 for a phase that did not run. An absent section is a defect, not a configuration.
+
+`truncation` is about `errors[]` and nothing else, which is why the recipe above is a
+one-liner rather than a per-entity audit. No cap shortens the inventory: a batch describes
+every topic, partition, group and offset it was pointed at, or the section that could not be
+completed says so in `sections[].status`. There is deliberately no third state where a
+payload describes part of a cluster as though it were the whole one, and that is what makes
+`topics[].partition_count`, `groups[].member_count` and `offsets[].offset_count` always equal
+the length of the list beside them — a mismatch is a sender bug, and the conformance mock in
+level 4 fails it as one. What a deployment does not want to watch belongs in `TOPIC_INCLUDE`
+and friends, and those travel with the data in the batch's `selection` block so the far end
+can tell "the cluster has 40 topics" from "the agent was pointed at 40 of them". `selection`
+is absent when nothing was filtered, which is the only positive signal that a batch covers
+everything.
 
 ---
 
@@ -188,10 +201,10 @@ written by `kafka-storage format --add-scram` before the broker starts;
 
 ## 4. HTTP export against the conformance mock
 
-`EXPORT_ENDPOINT` has nowhere real to point yet, so the repo ships its own receiver.
-`cmd/mock-ingest` is a **conformance checker, not an ingest**: it stores nothing and
-validates roughly a hundred invariants on every batch, each with a stable, greppable dotted
-code.
+For local work the repo ships its own receiver rather than pointing `EXPORT_ENDPOINT` at
+anything real. `cmd/mock-ingest` is a **conformance checker, not an ingest**: it stores
+nothing and runs roughly eighty invariants over every batch, each with a stable, greppable
+dotted code; one whose section the batch does not carry reports nothing rather than failing.
 
 ```bash
 make test-http          # SASL/ACL Kafka + agent in http mode + mock, following the output
@@ -315,7 +328,7 @@ tail -1 khaos-run.jsonl | gzip -9 | wc -c
 # which top-level key is eating the batch
 tail -1 khaos-run.jsonl | jq -r 'to_entries[] | "\(.value|tostring|length)\t\(.key)"' | sort -rn
 
-# did any section fail, or get truncated, at any point in the run?
+# did any section fail, or lose errors[] entries, at any point in the run?
 jq -r '.sections[] | select(.status != "ok" and .status != "skipped") | .name + " " + .status' \
   khaos-run.jsonl | sort | uniq -c
 jq -c 'select(.truncation)' khaos-run.jsonl | head
@@ -486,9 +499,3 @@ Honest gaps, so nobody assumes a green test run covers them:
   a single-node 4.1.0. 4.0 shipped share groups as early access, where `unstable.api.versions.enable`
   and an explicit `share` in `group.coordinator.rebalance.protocols` may still be required; none
   of that was tested, so do not read the level-6 notes as holding for 4.0.
-- **Every entity cap defaults to unlimited.** Truncation is reported at batch, section and
-  entity level when a cap is set, but no default cap has been chosen, so nothing bounds the
-  batch on a pathological cluster.
-- **No unit test** covers the SIGTERM/`batch_seq` path, the file exporter's `needsReopen`
-  rotation retry, or `EXPORT_FILE_FSYNC`. The first is covered at runtime only, by the mock's
-  `idempotency.seq_gap` check.

@@ -305,18 +305,20 @@ and `agent.rpc` is read off hooks on requests the agent was sending anyway — n
 no ACL, no broker work. Each is still switched off automatically on a cluster too old to
 serve it, which is a capability probe's job rather than an operator's.
 
-**Removed after v0.2.0:** `COLLECT_GROUP_STATES`, `GROUP_STATE_POLL_INTERVAL` and
-`MAX_TRANSITIONS_PER_GROUP`. The fast group-state poll was measured against a real rebalance
-storm and detected 2 of 31 rebalances, because a rebalance completes well inside its
-shortest useful tick; member-set churn in `groups[].members[].member_id` detected all 31 at
-zero request cost. Unset variables are ignored, not rejected. `GROUP_STATES` above is a
-**different** setting — the broker-side `ListGroups` filter — and is unaffected.
-
 `GROUP_STATES` is the cheapest cardinality control available: the broker applies it before
 building the response, so filtered groups never cross the wire. The flip side — both logged
 as startup warnings — is that excluding `Empty` hides groups whose consumers have *all*
 died, which is usually the incident you are looking for, and that a group leaving the
 filtered set is indistinguishable at the backend from a deleted one.
+
+`GROUP_STATES` is worth naming once, because two unrelated things were spelled almost the
+same. The other one was a **section** — a second ticker polling `ListGroups` between cycles
+to time how long a group dwelt in each state — and it is gone, along with
+`GROUP_STATE_POLL_INTERVAL` and `MAX_TRANSITIONS_PER_GROUP`. Measured against a real
+rebalance storm it detected 2 of 31 member-set changes, because a rebalance completes well
+inside its shortest useful tick, while member-set churn in `groups[].members[].member_id`
+detected all 31 at zero request cost. `GROUP_STATES` above is the broker-side `ListGroups`
+state filter: different mechanism, different direction, and not going anywhere.
 
 ### Cardinality caps
 
@@ -735,9 +737,10 @@ authentication completes and carries no ACL at all.
 
 The three `DESCRIBE` grants are verified end to end against a broker with
 `allow.everyone.if.no.acl.found=false` and exactly that set (see
-[Local testing](#local-testing)), in both `stdout` and `http` export mode; removing any one
-of them degrades the corresponding section to `unauthorized` rather than silently emptying
-it. The two `CLUSTER`-gated APIs in the first row are measured the same way, each with its
+[Local testing](#local-testing)); removing any one of them degrades the corresponding
+section to `unauthorized` rather than silently emptying it. That run exports to `stdout`;
+`make test-http` is what puts the same principal behind the `http` exporter and the
+conformance mock. The two `CLUSTER`-gated APIs in the first row are measured the same way, each with its
 own negative control. Running as that principal and holding nothing but those three grants,
 `log_dirs` comes back `ok` with per-replica bytes and the KIP-827 volume figures on the very
 first batch — the phase samples on cycle 0, so nobody has to wait for it — and
@@ -859,8 +862,13 @@ rpk security acl create --allow-principal User:streamsight-agent --operation des
 docker run --rm \
   -e KAFKA_BROKERS=broker:9092 \
   -v streamsight-data:/var/lib/streamsight \
-  ghcr.io/streamsight-labs/streamsight-agent:latest
+  ghcr.io/streamsight-labs/streamsight-agent:main
 ```
+
+`main` is the head of the default branch and `sha-<short>` pins one commit — those are the
+only tags published so far. `:latest` and the version tags are written by
+`.github/workflows/promote.yml` after a `v*` release tag, and none has been cut yet, so they
+do not resolve.
 
 The image runs as uid 1000 with a read-only root filesystem in mind, and defaults
 `EXPORT_FILE` to `/var/lib/streamsight/metrics.jsonl`. Mount something writable there, or
@@ -868,7 +876,10 @@ use `-e EXPORT_MODE=stdout` and let the container runtime collect the batches.
 
 **Kubernetes** — Helm chart in `charts/streamsight-agent`, plain manifests in `deploy/k8s`.
 Run one replica: two agents collect and ship every batch twice. Shard by topic/group filters
-across separate releases if one agent is not enough.
+across separate releases if one agent is not enough. Neither carries a tag that exists yet:
+the chart defaults to `.Chart.AppVersion` and the manifests pin `:latest`, and both are
+release tags nothing has published. Pass `--set image.tag=main` to `helm install`, or
+`kubectl set image` after applying the manifests, until `v0.1.0` is tagged and promoted.
 
 ## Local testing
 
@@ -906,8 +917,8 @@ written by `kafka-storage format --add-scram` before the broker starts;
 
 ### Testing http mode locally
 
-`EXPORT_ENDPOINT` has nowhere to point until a backend exists, so this repo ships its own
-mock ingest. It is a **conformance checker**, not an ingest: it stores nothing and
+For local work the repo ships its own receiver rather than pointing `EXPORT_ENDPOINT` at
+anything real. It is a **conformance checker**, not an ingest: it stores nothing and
 validates everything.
 
 ```bash
@@ -932,7 +943,8 @@ curl localhost:8088/stats
 curl 'localhost:8088/batches?n=1' | jq
 ```
 
-Roughly seventy-five checks run on every batch, each with a greppable dotted code: gzip and
+Roughly eighty checks, each with a greppable dotted code, run over every batch — one whose
+section the batch does not carry reports nothing rather than failing: gzip and
 `Content-Encoding` agreement, `Idempotency-Key` format and uniqueness, body-hash stability,
 `batch_seq` monotonicity and gap detection, strict decode with `DisallowUnknownFields`, the
 seventeen-section list and its ordering, per-section `error_count`, truncation accounting, and

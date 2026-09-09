@@ -31,13 +31,15 @@ const SchemaVersion = 1
 // be distinguished from zero. A partition whose offset lookup failed reports
 // null, never 0.
 //
-// The PRESENCE of Truncation means the batch is incomplete; its absence means
-// complete. It is reported at three levels, which answer different questions:
-// batch ("can I aggregate cluster-wide from this?"), section ("is topic
-// inventory short while groups are fine?"), and entity, where the
-// pre-truncation counts (TopicMetrics.PartitionCount, GroupMetrics.MemberCount,
-// ConsumerOffset.OffsetCount) stay TRUE, so len(list) < count is
-// self-describing.
+// The PRESENCE of Truncation means errors[] is short, and nothing more. It is
+// reported at two levels, which answer different questions: batch ("did this
+// cycle drop error detail?") and section ("which phase's errors were folded?").
+// There is no entity level, because nothing truncates the inventory — a batch
+// describes every topic, group and partition it was pointed at, or the section
+// says why it could not. The *_count fields (TopicMetrics.PartitionCount,
+// GroupMetrics.MemberCount, ConsumerOffset.OffsetCount) are therefore a
+// sender-bug check rather than a coverage signal: len(list) must EQUAL count,
+// and a mismatch is the agent malfunctioning, not a ceiling biting.
 type Batch struct {
 	SchemaVersion   int    `json:"schema_version"`
 	AgentVersion    string `json:"agent_version"`
@@ -523,8 +525,10 @@ type TopicMetrics struct {
 	ID       string `json:"id,omitempty"`
 	Internal bool   `json:"internal"`
 
-	// PartitionCount is the broker's partition count, computed BEFORE any cap.
-	// len(Partitions) < PartitionCount means the partition list was truncated.
+	// PartitionCount is the broker's own partition count, carried so a consumer
+	// can check the list against the source that produced it. Nothing shortens
+	// the list, so len(Partitions) must EQUAL PartitionCount; a mismatch is a
+	// sender bug worth alerting on, not a truncation to reason about.
 	PartitionCount int `json:"partition_count"`
 	// ReplicationFactor is the minimum replica count across partitions, a
 	// summary only; per-partition truth is Partition.Replicas, which diverges
@@ -780,8 +784,11 @@ type GroupMetrics struct {
 	// ListGroups -- the same request it was already broadcasting, not an extra
 	// one. Same reason T1.9 reads log-dir volume bytes off a raw request.
 	GroupType string `json:"group_type,omitempty"`
-	// MemberCount is the coordinator's member count, computed BEFORE any cap.
-	// len(Members) < MemberCount means the member list was truncated.
+	// MemberCount is the coordinator's own member count. Nothing shortens the
+	// list, so len(Members) must EQUAL MemberCount, and a mismatch is a sender
+	// bug. The one case that looks like a mismatch and is not: a new-protocol
+	// group the classic DescribeGroups cannot see reports 0 members with a
+	// GROUP_ID_NOT_FOUND error_code, where the count is absent rather than short.
 	MemberCount int           `json:"member_count"`
 	Members     []GroupMember `json:"members"`
 	ErrorCode   int16         `json:"error_code,omitempty"`
@@ -856,10 +863,10 @@ type ConsumerOffset struct {
 	// the section status.
 	ErrorCode int16             `json:"error_code,omitempty"`
 	Offsets   []PartitionOffset `json:"offsets"`
-	// OffsetCount is how many offsets survived filtering, BEFORE any cap. It
-	// carries no omitempty for the same reason PartitionCount and MemberCount
-	// do not: len(Offsets) < OffsetCount is the only per-entity truncation
-	// signal, and it must be readable without cross-checking the batch.
+	// OffsetCount is how many offsets survived filtering. It carries no
+	// omitempty for the same reason PartitionCount and MemberCount do not: the
+	// equality len(Offsets) == OffsetCount is the per-entity sender-bug check,
+	// and it must be readable without cross-checking the batch.
 	OffsetCount int `json:"offset_count"`
 }
 

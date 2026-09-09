@@ -16,12 +16,11 @@ import (
 // shared by the groups and offsets phases. The error is returned rather than
 // recorded so each consuming section can attribute it to itself.
 //
-// MaxGroups is enforced here and nowhere else. One enforcement point shrinks
-// both the DescribeGroups and the FetchManyOffsets fan-out, and guarantees
-// groups[] and offsets[] describe the SAME set of groups; capping independently
-// in each phase would let the two sections disagree about which groups exist —
-// a data integrity bug, not a payload one. listed.Sorted() makes the retained
-// prefix the same set every cycle.
+// The group filters are applied here and nowhere else. One filtering point
+// shrinks both the DescribeGroups and the FetchManyOffsets fan-out, and
+// guarantees groups[] and offsets[] describe the SAME set of groups; filtering
+// independently in each phase would let the two sections disagree about which
+// groups exist — a data integrity bug, not a payload one.
 func (c *Collector) listGroups(ctx context.Context) (ids []string, types map[string]string, err error) {
 	listed, types, err := c.listGroupsWithTypes(ctx)
 

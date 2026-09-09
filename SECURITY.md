@@ -57,16 +57,18 @@ stable offset needs no grant beyond the one already required for the high waterm
 content — and the broker gates it on `DESCRIBE` on `CLUSTER`, which is measured rather than
 assumed: see below.
 
-Four APIs have been evaluated and their authorization measured against a live broker with a
+Three APIs have had their authorization measured against a live broker with a
 non-permissive authorizer. `OffsetForLeaderEpoch` is satisfied by the existing grants.
 `DescribeLogDirs` and `ListPartitionReassignments` are too, measured in both directions: as a
 principal holding nothing but the three `DESCRIBE` grants the agent's `log_dirs` and
 `reassignments` sections both report `ok` — the second on a deliberately under-replicated
 partition, because that request fires on no other cycle — and revoking `DESCRIBE` on
 `CLUSTER` turns both `unauthorized` with `CLUSTER_AUTHORIZATION_FAILED`. There is no sixth
-grant behind either of them. `DescribeProducers` requires `READ` on `TOPIC` and is therefore
-**excluded from this agent by design**, because `READ` on a topic would permit consuming its
-records.
+grant behind either of them. A fourth API, `DescribeProducers`, requires `READ` on `TOPIC`
+and is therefore **excluded from this agent by design**, because `READ` on a topic would
+permit consuming its records. That requirement is read off Kafka's authorization rules and
+is the one claim here that nothing measured: the agent never issues the call, so no broker
+has ever been asked to refuse it.
 
 `DESCRIBE_CONFIGS` is the one grant outside the original three DESCRIBE grants. It is
 read-only and it is **not** `ALTER_CONFIGS`: it permits reading configuration, never
@@ -161,5 +163,9 @@ Out of scope: vulnerabilities in Kafka itself, in your broker configuration, or
 in the network path; findings that require an attacker who already has the
 agent's credentials or a shell in its container; missing hardening that has no
 demonstrated impact; and DoS achieved by pointing the agent at a cluster with a
-pathological entity count (a known and documented limitation: every entity cap
-defaults to unlimited, and `truncation` reports whatever a configured cap drops).
+pathological entity count (a known and documented limitation: nothing truncates
+the inventory, by design — a batch describes everything it was pointed at or a
+section reports why it could not, so the only bound on batch size is the
+selection surface — `TOPIC_INCLUDE`/`TOPIC_EXCLUDE`, `GROUP_INCLUDE`/`GROUP_EXCLUDE`,
+`INCLUDE_INTERNAL_TOPICS` and the broker-side `GROUP_STATES` filter — which are
+operator decisions the payload echoes back in `selection`).

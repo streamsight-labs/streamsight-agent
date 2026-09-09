@@ -40,8 +40,17 @@ spec:
           type: RuntimeDefault
       containers:
         - name: agent
-          # Published by .github/workflows/docker.yml. Pin a released tag
-          # rather than tracking :latest in anything you care about.
+          # Published by .github/workflows/docker.yml; :latest is moved onto a
+          # release image by .github/workflows/promote.yml, manually, after a v*
+          # tag. NO RELEASE HAS BEEN PROMOTED YET, so this tag does not resolve
+          # today and the pod will ImagePullBackOff. Until v0.1.0 is cut, apply
+          # the directory and then point it at a tag that exists:
+          #
+          #   kubectl set image deployment/streamsight-agent \
+          #     agent=ghcr.io/streamsight-labs/streamsight-agent:main
+          #
+          # `main` follows the head of main; `sha-<short>` pins one commit, which
+          # is what anything you care about should be tracking.
           image: ghcr.io/streamsight-labs/streamsight-agent:latest
           imagePullPolicy: IfNotPresent
           envFrom:

@@ -286,8 +286,15 @@ func (c *Collector) Collect(ctx context.Context) *metrics.Batch {
 		wg sync.WaitGroup
 	)
 
-	// The cycle counter is 0-based, so a freshly started agent samples every
-	// cadenced phase on its first cycle rather than N intervals in.
+	// The cycle counter is 0-based, and each cadenced phase adds its own
+	// constant offset before the modulo, so only the phase whose offset is zero
+	// (log dirs) samples on a fresh agent's first cycle. The staggered ones
+	// first sample at (every-offset) mod every — cycle 10 for max-timestamp,
+	// cycle 355 for the two config sections, at the shipped cadences. That is
+	// the point of the offsets rather than a cost of them: a crash-looping
+	// agent no longer re-issues every expensive phase on every restart. See the
+	// offset block near the bottom of this file for the proof they never
+	// coincide.
 	n := c.cycle.Add(1) - 1
 	var (
 		runWindow = runsThisCycle(c.opts.CollectThroughputWindow, c.opts.ThroughputWindowEvery, phaseWindow, n)
