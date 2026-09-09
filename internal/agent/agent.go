@@ -109,6 +109,7 @@ func New(cfg *config.Config, version string) (*Agent, error) {
 
 	exporter, err := export.New(export.Config{
 		Mode:       cfg.ExportMode,
+		Logger:     logger,
 		Endpoint:   cfg.ExportEndpoint,
 		APIKey:     cfg.APIKey,
 		QueueSize:  cfg.ExportQueueSize,

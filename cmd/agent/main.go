@@ -23,7 +23,7 @@ func main() {
 	// deferred cleanup -- flushing the exporter, closing the Kafka client --
 	// actually runs.
 	if err := run(); err != nil {
-		slog.Error("agent failed", "error", err)
+		fatal(os.Stderr, "agent failed", err)
 		os.Exit(1)
 	}
 }
@@ -59,11 +59,25 @@ func run() error {
 	}
 	defer func() {
 		if err := a.Close(); err != nil {
-			slog.Error("shutdown error", "error", err)
+			fatal(os.Stderr, "shutdown error", err)
 		}
 	}()
 
 	return a.Run()
+}
+
+// fatal reports a failure on its way out of main. It builds its own handler
+// rather than calling slog.Error, because the package-level default logger uses
+// the log package's format: a run that fails after startup would then print the
+// agent's own lines in one shape and this one in another, in the same stderr
+// stream, which is the first thing anyone reading a pasted log notices. The
+// agent's configured logger is not reachable here -- two of the three failures
+// this reports (an unloadable config, an agent that could not be built) happen
+// before one exists -- so the handler is mirrored instead of shared. Level is
+// left at the default: every line from here is ERROR, which no accepted
+// LOG_LEVEL suppresses.
+func fatal(w io.Writer, msg string, err error) {
+	slog.New(slog.NewTextHandler(w, nil)).Error(msg, "error", err)
 }
 
 // printVersion answers "what exactly is this binary" without a broker, a

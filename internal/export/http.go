@@ -90,6 +90,13 @@ type HTTPExporter struct {
 	endpoint string
 	apiKey   string
 
+	// log is the agent's configured logger, injected rather than reached for
+	// through slog.Default(). Nothing in this program calls slog.SetDefault, so
+	// a package-level slog.Warn here would bypass LOG_LEVEL entirely: the WARN
+	// and ERROR lines would print at any level, the two DEBUG lines below could
+	// never print at all, and stderr would carry two handler formats at once.
+	log *slog.Logger
+
 	queue chan queued
 	wg    sync.WaitGroup
 	done  chan struct{}
@@ -122,6 +129,10 @@ type HTTPExporterConfig struct {
 	MaxRetries int
 	BaseDelay  time.Duration
 	Timeout    time.Duration
+	// Logger receives every line this exporter emits. Zero means
+	// slog.Default(), which is what a test that does not care about logging
+	// gets; the agent always passes the logger it built from LOG_LEVEL.
+	Logger *slog.Logger
 }
 
 // NewHTTPExporter builds the exporter and starts its single worker. Only a
@@ -141,6 +152,9 @@ func NewHTTPExporter(cfg HTTPExporterConfig) *HTTPExporter {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = defaultHTTPTimeout
 	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -148,6 +162,7 @@ func NewHTTPExporter(cfg HTTPExporterConfig) *HTTPExporter {
 		client:        &http.Client{Timeout: cfg.Timeout},
 		endpoint:      cfg.Endpoint,
 		apiKey:        cfg.APIKey,
+		log:           cfg.Logger,
 		queue:         make(chan queued, cfg.QueueSize),
 		done:          make(chan struct{}),
 		ctx:           ctx,
@@ -190,7 +205,7 @@ func (e *HTTPExporter) Export(ctx context.Context, batch *metrics.Batch) error {
 		// same unencodable batch -- so it is dropped here rather than queued.
 		e.dropped.Add(1)
 		e.recordError(err)
-		slog.Error("export encode failed, dropping batch", "error", err, "batch_seq", batch.BatchSeq)
+		e.log.Error("export encode failed, dropping batch", "error", err, "batch_seq", batch.BatchSeq)
 		return err
 	}
 	q := queued{
@@ -227,7 +242,7 @@ func (e *HTTPExporter) Export(ctx context.Context, batch *metrics.Batch) error {
 	case stale := <-e.queue:
 		e.dropped.Add(1)
 		e.recordError(ErrQueueFull)
-		slog.Warn("export queue full, dropping oldest batch",
+		e.log.Warn("export queue full, dropping oldest batch",
 			"queue_size", cap(e.queue), "dropped_batch_seq", stale.seq, "kept_batch_seq", q.seq)
 	default:
 		// Drained between the two selects; nothing to evict.
@@ -273,7 +288,7 @@ func (e *HTTPExporter) Close() error {
 	select {
 	case <-drained:
 	case <-time.After(e.shutdownGrace):
-		slog.Warn("export drain timed out, cancelling in-flight request", "grace", e.shutdownGrace)
+		e.log.Warn("export drain timed out, cancelling in-flight request", "grace", e.shutdownGrace)
 		e.cancel()
 		<-drained
 	}
@@ -321,17 +336,17 @@ func (e *HTTPExporter) sendWithRetry(q queued) {
 			if remaining := time.Until(deadline); remaining <= 0 || delay > remaining {
 				e.dropped.Add(1)
 				e.recordError(fmt.Errorf("export abandoned after %s retry budget: %w", e.retryBudget, lastErr))
-				slog.Warn("export abandoned, retry budget exhausted",
+				e.log.Warn("export abandoned, retry budget exhausted",
 					"budget", e.retryBudget, "attempts", attempt, "next_delay", delay,
 					"batch_seq", q.seq, "error", lastErr)
 				return
 			}
 			e.retries.Add(1)
-			slog.Debug("retrying export", "attempt", attempt, "delay", delay)
+			e.log.Debug("retrying export", "attempt", attempt, "delay", delay)
 			if !e.wait(delay) {
 				e.dropped.Add(1)
 				e.recordError(fmt.Errorf("export abandoned during shutdown: %w", lastErr))
-				slog.Warn("export abandoned during shutdown", "error", lastErr)
+				e.log.Warn("export abandoned during shutdown", "error", lastErr)
 				return
 			}
 		}
@@ -339,7 +354,7 @@ func (e *HTTPExporter) sendWithRetry(q queued) {
 		err := e.send(q)
 		if err == nil {
 			e.exported.Add(1)
-			slog.Debug("export successful", "collected_at", q.collectedAt, "batch_seq", q.seq)
+			e.log.Debug("export successful", "collected_at", q.collectedAt, "batch_seq", q.seq)
 			return
 		}
 
@@ -351,17 +366,17 @@ func (e *HTTPExporter) sendWithRetry(q queued) {
 			if !retryableStatus(he.StatusCode) {
 				e.rejected.Add(1)
 				e.recordError(err)
-				slog.Error("ingest rejected batch, not retrying", "error", err)
+				e.log.Error("ingest rejected batch, not retrying", "error", err)
 				return
 			}
 			retryAfter = he.RetryAfter
 		}
-		slog.Warn("export failed", "attempt", attempt+1, "error", err)
+		e.log.Warn("export failed", "attempt", attempt+1, "error", err)
 	}
 
 	e.dropped.Add(1)
 	e.recordError(lastErr)
-	slog.Error("export failed after retries", "retries", e.maxRetries, "error", lastErr)
+	e.log.Error("export failed after retries", "retries", e.maxRetries, "error", lastErr)
 }
 
 // backoff is full jitter: a uniform draw from [0, capped exponential]. Bare

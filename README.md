@@ -260,7 +260,7 @@ configuration problems at once and exits non-zero — one restart per fix, not f
 | Variable | Default | Required when | Notes |
 |----------|---------|---------------|-------|
 | `EXPORT_MODE` | `http` if `EXPORT_ENDPOINT` is set, else `file` | — | `file` \| `http` \| `stdout`. Any other value is an error. |
-| `EXPORT_ENDPOINT` | — | `EXPORT_MODE=http` | Full URL that batches are POSTed to, **verbatim** — the agent appends no path, so the route is the receiver's decision. There is deliberately no default: setting this is what infers `http` mode in the first place, so the only agent that can reach http mode without an endpoint is one whose operator wrote `EXPORT_MODE=http` by hand, and any URL compiled in for that case would be a guess at where *their* receiver lives. Missing, it is a startup error rather than a per-batch retry against a host nobody chose. |
+| `EXPORT_ENDPOINT` | — | `EXPORT_MODE=http` | Full URL that batches are POSTed to, **verbatim** — the agent appends no path, so the route is the receiver's decision. There is deliberately no default: setting this is what infers `http` mode in the first place, so the only agent that can reach http mode without an endpoint is one whose operator wrote `EXPORT_MODE=http` by hand, and any URL compiled in for that case would be a guess at where *their* receiver lives. Missing, it is a startup error rather than a per-batch retry against a host nobody chose, and so is a malformed one: the URL is parsed at startup, and a scheme other than `http`/`https` or a URL with no host fails there rather than once per cycle forever. A plain `http://` endpoint to a non-loopback host is accepted but warns — the API key and the whole batch would cross the network in cleartext. |
 | `API_KEY` | — | `EXPORT_MODE=http` | Sent as `X-API-Key`. Never required in file/stdout mode. |
 | `EXPORT_FILE` | `./metrics.jsonl` (`/var/lib/streamsight/metrics.jsonl` in the image) | file mode | Parent directories are created. |
 | `EXPORT_FILE_MAX_MB` | `100` | file mode | `0` uses the 100MB default; negative disables rotation. |
@@ -366,7 +366,7 @@ and travels with the data in `selection` so the far end knows what it is looking
 | `KAFKA_SASL_MECHANISM` | `""` | `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`. Anything else is an error. |
 | `KAFKA_SASL_USERNAME` | — | Required iff a mechanism is set. |
 | `KAFKA_SASL_PASSWORD` | — | Required iff a mechanism is set. Redacted from all logs. |
-| `KAFKA_TLS_ENABLED` | `false` | System root CAs, verified certificates, TLS 1.2 floor. There is no "skip verification" knob. |
+| `KAFKA_TLS_ENABLED` | `false` | System root CAs, verified certificates, TLS 1.2 floor. There is no "skip verification" knob. Leaving it `false` while SASL is configured is a startup warning: the credential exchange is then unencrypted, and `PLAIN` puts the username and password on the wire verbatim. |
 
 ### Agent
 

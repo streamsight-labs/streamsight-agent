@@ -1156,3 +1156,131 @@ func TestAllKeysCoversEveryEnvVarLoadReads(t *testing.T) {
 		}
 	}
 }
+
+// A bad endpoint has to fail at startup. net/http rejects an unknown scheme per
+// request, so without this the agent starts, reports itself configured, and
+// then fails every cycle forever with only a WARN to explain it.
+func TestLoadEndpointValidation(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+		wantErr  string
+	}{
+		{"wrong scheme", "ftp://ingest.example/v1", "must be an http:// or https:// URL"},
+		{"no scheme at all", "ingest.example/v1", "must be an http:// or https:// URL"},
+		{"scheme but no host", "https:///v1/batches", "has no host"},
+		{"unparseable", "http://[::1/v1", "is not a valid URL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setEnv(t, base(map[string]string{"EXPORT_ENDPOINT": tt.endpoint, "API_KEY": "k"}))
+			_, err := Load()
+			requireErrContains(t, err, tt.wantErr)
+			requireErrContains(t, err, "EXPORT_ENDPOINT")
+		})
+	}
+
+	for _, ok := range []string{"https://ingest.example/v1", "http://ingest.example:8088/v1", "https://x"} {
+		t.Run("accepts "+ok, func(t *testing.T) {
+			setEnv(t, base(map[string]string{"EXPORT_ENDPOINT": ok, "API_KEY": "k"}))
+			if _, err := Load(); err != nil {
+				t.Fatalf("Load(%q): %v", ok, err)
+			}
+		})
+	}
+
+	// Only http mode POSTs anywhere, so an ignored endpoint is not worth a
+	// startup failure -- Warnings already says it is ignored.
+	t.Run("not validated when the mode ignores it", func(t *testing.T) {
+		setEnv(t, base(map[string]string{"EXPORT_MODE": "file", "EXPORT_ENDPOINT": "ftp://nope"}))
+		if _, err := Load(); err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+	})
+}
+
+func TestCleartextExportWarning(t *testing.T) {
+	warnings := func(t *testing.T, endpoint string) string {
+		t.Helper()
+		setEnv(t, base(map[string]string{"EXPORT_ENDPOINT": endpoint, "API_KEY": "k"}))
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load(%q): %v", endpoint, err)
+		}
+		return strings.Join(cfg.Warnings(), "\n")
+	}
+
+	t.Run("plain http to a remote host warns about the key", func(t *testing.T) {
+		if w := warnings(t, "http://ingest.example/v1"); !strings.Contains(w, "cleartext") {
+			t.Errorf("warnings = %q, want a cleartext warning", w)
+		}
+	})
+
+	t.Run("https does not warn", func(t *testing.T) {
+		if w := warnings(t, "https://ingest.example/v1"); strings.Contains(w, "cleartext") {
+			t.Errorf("https warned: %q", w)
+		}
+	})
+
+	// The repo's own mock ingest is reached over loopback. Warning there would
+	// fire on the documented development loop and teach operators to skip the
+	// line, so it must stay silent.
+	for _, local := range []string{"http://localhost:8088/v1/batches", "http://127.0.0.1:8088/v1/batches", "http://[::1]:8088/v1/batches"} {
+		t.Run("loopback stays quiet: "+local, func(t *testing.T) {
+			if w := warnings(t, local); strings.Contains(w, "cleartext") {
+				t.Errorf("loopback warned: %q", w)
+			}
+		})
+	}
+}
+
+// SASL without TLS puts the credentials on the wire unprotected. It is legal --
+// some operators mean it on a trusted segment -- so it warns rather than fails.
+func TestSASLWithoutTLSWarns(t *testing.T) {
+	sasl := map[string]string{
+		"KAFKA_SASL_MECHANISM": "PLAIN",
+		"KAFKA_SASL_USERNAME":  "alice",
+		"KAFKA_SASL_PASSWORD":  "hunter2",
+	}
+	withTLS := map[string]string{"KAFKA_TLS_ENABLED": "true"}
+	for k, v := range sasl {
+		withTLS[k] = v
+	}
+
+	t.Run("warns and never quotes the password", func(t *testing.T) {
+		setEnv(t, base(sasl))
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		w := strings.Join(cfg.Warnings(), "\n")
+		if !strings.Contains(w, "KAFKA_TLS_ENABLED=false") || !strings.Contains(w, "PLAIN") {
+			t.Errorf("warnings = %q, want a plaintext-SASL warning", w)
+		}
+		if strings.Contains(w, "hunter2") {
+			t.Errorf("the warning leaks the password: %q", w)
+		}
+	})
+
+	t.Run("no warning once TLS is on", func(t *testing.T) {
+		setEnv(t, base(withTLS))
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if w := strings.Join(cfg.Warnings(), "\n"); strings.Contains(w, "KAFKA_TLS_ENABLED=false") {
+			t.Errorf("SASL over TLS warned: %q", w)
+		}
+	})
+
+	t.Run("no warning without SASL", func(t *testing.T) {
+		setEnv(t, base(nil))
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if w := strings.Join(cfg.Warnings(), "\n"); strings.Contains(w, "SASL") {
+			t.Errorf("an agent with no SASL warned about it: %q", w)
+		}
+	})
+}
