@@ -1,6 +1,6 @@
 # Testing
 
-Five levels, each proving something the one below it cannot. Run them in order the first
+Six levels, each proving something the one below it cannot. Run them in order the first
 time; after that, run the level that matches what you changed.
 
 | Level | Needs | Proves |
@@ -10,8 +10,9 @@ time; after that, run the level that matches what you changed.
 | [3. The permission model](#3-the-permission-model-sasl--acls) | Docker | It works inside the ACLs the product promises |
 | [4. HTTP export](#4-http-export-against-the-conformance-mock) | Docker | The export path, and ~100 conformance checks per batch |
 | [5. Multi-broker under load](#5-multi-broker-under-load-and-failure-khaos) | Docker + [Khaos](https://github.com/aleksandarskrbic/khaos) | Payload size at real cardinality, and the trigger-driven phases |
+| [6. Kafka 4.x](#6-kafka-4x-the-two-group-protocols-no-older-broker-can-serve) | Docker | The KIP-848 and KIP-932 paths every other level gates off |
 
-Levels 1–4 need nothing that isn't in this repo. Level 5 is where the interesting failures
+Levels 1–4 and 6 need nothing that isn't in this repo. Level 5 is where the interesting failures
 are: a healthy single-broker cluster never fires half the collectors.
 
 ---
@@ -351,6 +352,111 @@ Partitions and committed-offset rows are the axes; broker count is not.
 
 ---
 
+## 6. Kafka 4.x: the two group protocols no older broker can serve
+
+Levels 2–4 all run `confluentinc/cp-kafka:7.5.0`, which is Kafka 3.5. It advertises neither
+`ConsumerGroupDescribe` (KIP-848, API key 69) nor `ShareGroupDescribe` (KIP-932, key 77), so
+the capability probe disables both phases at startup — correctly, and every time. That makes
+those levels a test of the *degradation* path only. This one runs the other path:
+
+```bash
+make test-kafka4        # broker, share.version=1, traffic, three consumers, agent
+make test-kafka4-logs   # follow the agent again later
+make test-kafka4-down   # stop and delete the volumes
+```
+
+`test/docker-compose.kafka4.yml` is Apache Kafka 4.1.0, one KRaft node, published on
+`localhost:39092` so it can run beside every other environment here. Against one topic
+(`orders`, 6 partitions) under a continuous producer it runs three consumers at once — a
+classic one, one with `group.protocol=consumer`, and a `kafka-console-share-consumer` — so a
+single batch carries all three group kinds. The agent runs with `COLLECT_SHARE_GROUPS=true`
+in stdout mode.
+
+### What 4.1 needs before it will serve them
+
+Read off `kafka-features describe` on a freshly formatted 4.1 cluster, not off the release notes:
+
+- **KIP-848 needs nothing.** `group.version` is already `FinalizedVersionLevel: 1` on a fresh
+  cluster. A client that asks for `group.protocol=consumer` gets a new-protocol group with no
+  broker configuration at all.
+- **KIP-932 is off by default.** `share.version` is `FinalizedVersionLevel: 0` on a fresh
+  cluster — while the same broker answers `ShareGroupDescribe(77): 1 [usable: 1]` in
+  `ApiVersions`. So the capability probe reports the API supported on a stock 4.1 broker where
+  no share group can exist, and the section reports `skipped` for a reason nothing on the wire
+  distinguishes from "no share groups have been created". `setup-kafka4.sh` raises the feature
+  with `kafka-features upgrade`, because the `apache/kafka` image formats its own storage and
+  gives no way to pass `kafka-storage format --feature`.
+- **`share.coordinator.state.topic.replication.factor` defaults to 3, its `min.isr` to 2**,
+  which one broker cannot satisfy, and the failure is silent. Measured on a probe cluster with
+  the defaults left alone: the share group reaches `Stable` with its one member, that member is
+  assigned **0 partitions**, `--describe` returns an empty start-offset table, the
+  `__share_group_state` topic is never created, and the consumer logs nothing but the generic
+  KIP-932 preview warning. No error is raised anywhere. The compose file sets both to 1. This
+  is the one that costs an afternoon.
+- **`group.coordinator.rebalance.protocols` is not involved**, and neither is
+  `unstable.api.versions.enable`. Share groups were verified working on 4.1.0 with the stock
+  `classic,consumer,streams` list and no unstable-API flag.
+
+### What came back — apache/kafka 4.1.0, one broker
+
+The probe **enables** both phases: the agent logs no `disabling` line at all, and on the wire
+`software_versions: ["v4.1"]`, `features.consumer_group_describe: true`, with
+`api_max_versions` reporting `consumer_group_describe: 1`, `list_groups: 5`,
+`list_offsets: 10`, `metadata: 13`, `describe_log_dirs: 4`, `offset_for_leader_epoch: 4`,
+`list_partition_reassignments: 0`. Section statuses in a steady-state batch: **`share_groups`
+`ok`**, **`groups` `partial`**, `cluster` / `topics` / `topics_lso` / `topics_end` / `offsets`
+/ `broker_rpc` `ok`, and the interval- and trigger-gated phases `skipped` as anywhere else
+(`log_dirs` answers `ok` on batch 1, on its cadence offset, then goes `skipped`).
+
+**Share groups work end to end.** `ShareGroupDescribe` and `DescribeShareGroupOffsets` both
+answered, and the section is fully populated — including the `member_epoch` that the KIP-848
+path below never gets:
+
+```json
+{"id":"share-workers","state":"Stable","coordinator":1,"group_epoch":2,"assignment_epoch":2,
+ "assignor":"simple","member_count":1,
+ "members":[{"member_id":"w4Iru_WeQS6EHp0ujsIeYg","client_id":"console-share-consumer",
+             "member_epoch":2,"subscribed_topics":["orders"],"assignment":[…6 partitions…]}],
+ "start_offsets":[{"topic":"orders","partition":0,"start_offset":228,"leader_epoch":0}, …]}
+```
+
+**KIP-848 populates the group epochs and nothing else.** `group_epoch`, `assignment_epoch` and
+`assignor` (`"uniform"`) arrive; `member_epoch` does not, and never can as the overlay is
+written. On 4.x the classic `DescribeGroups` answers `GROUP_ID_NOT_FOUND` for a new-protocol
+group, so the group ships with no members for `enrichConsumerGroups` to overlay onto:
+
+```json
+{"id":"classic-consumers","state":"Stable","group_type":"classic","member_count":1}
+{"id":"modern-consumers","state":"Dead","group_type":"consumer","member_count":0,"members":[],
+ "error_code":69,"group_epoch":1,"assignment_epoch":1,"assignor":"uniform"}
+{"id":"share-workers","state":"Dead","group_type":"share","member_count":0,"error_code":69}
+```
+
+The `modern-consumers` group was `Stable` with one live member holding all six partitions
+throughout, confirmed against `kafka-consumer-groups.sh --describe --members`. `Dead` is the
+broker's own word — Kafka returns it alongside `GROUP_ID_NOT_FOUND` — and the `offsets` section
+is unaffected: `OffsetFetch` returns all six committed offsets for that same group in the same
+batch, so one batch says both "this group has no members" and "here is what its members
+committed".
+
+**That leaves `groups` `partial` on every cycle, and it is a defect in the collector, not the
+rig.** Both the new-protocol group and the share group are refused, and error dedup collapses
+them — the key is `(api, kind, kafka_error_code, broker_id)`, so the two arrive as one exemplar
+with `count: 2` and whichever group was seen first in the `group` field:
+
+```json
+{"section":"groups","api":"DescribeGroups","group":"modern-consumers","kafka_error_code":69,
+ "kind":"other","message":"GROUP_ID_NOT_FOUND: The group id does not exist.","count":2}
+```
+
+`internal/collector/groups.go` treats the classic describe as authoritative and the KIP-848
+call as an overlay ("the classic describe is the one that decides"). On a 4.x cluster that is
+backwards for exactly the groups the overlay exists to describe, and share groups should not be
+in `DescribeGroups`' argument list at all — `collectShareGroups` already filters them out of its
+own phase by `GroupType` for precisely this reason.
+
+---
+
 ## Still unverified
 
 Honest gaps, so nobody assumes a green test run covers them:
@@ -364,11 +470,22 @@ Honest gaps, so nobody assumes a green test run covers them:
   because a stopped broker is a URP that nothing is moving. So `buildReassignments` has still
   never had `adding_replicas`/`removing_replicas` to shape. The authorization is settled; the
   payload is not.
-- **The KIP-848 success path.** `ConsumerGroupDescribe` runs as an overlay on the classic
-  describe and only its *degradation* path is verified (cp-kafka 7.5.0 disables the phase at
-  startup, correctly). No Kafka 4.x cluster has answered it.
-- **Share groups** (`COLLECT_SHARE_GROUPS`, KIP-932) have never run against a broker that can
-  answer. Kafka 4.0+.
+- **KIP-848 epochs under churn.** `group_epoch` and `assignment_epoch` are populated on a 4.1
+  cluster (level 6), but only ever observed at 1 on a single-member, single-broker group.
+  Nothing has watched them advance through a rebalance, which is the whole reason they are
+  collected — that needs Khaos' `chaos/rebalance-storm` pointed at a 4.x cluster. `member_epoch`
+  is a separate matter and is not a gap: it is never populated today, for the reason level 6
+  records.
+- **Share groups beyond one member, and under ACLs.** The section returns `ok` with epochs,
+  assignment and start offsets on Kafka 4.1 (level 6), but with a single share consumer, one
+  topic and no acknowledgement backlog; nothing has exercised a multi-member share group or a
+  member losing its assignment. `ShareGroupDescribe` and `DescribeShareGroupOffsets` have also
+  never run under a DESCRIBE-only principal — the level-3 SASL environment is cp-kafka 7.5.0
+  and cannot serve them at all — so `SECURITY.md`'s grant list is unverified for this section.
+- **Kafka 4.0.x, and any multi-broker 4.x cluster.** Everything level 6 records was measured on
+  a single-node 4.1.0. 4.0 shipped share groups as early access, where `unstable.api.versions.enable`
+  and an explicit `share` in `group.coordinator.rebalance.protocols` may still be required; none
+  of that was tested, so do not read the level-6 notes as holding for 4.0.
 - **Every entity cap defaults to unlimited.** Truncation is reported at batch, section and
   entity level when a cap is set, but no default cap has been chosen, so nothing bounds the
   batch on a pathological cluster.

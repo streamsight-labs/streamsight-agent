@@ -13,6 +13,11 @@ MOCK_PKG     := ./cmd/mock-ingest
 MOCK_BIN     := bin/mock-ingest
 COMPOSE_HTTP := docker compose -f docker-compose.yml -f docker-compose.http.yml
 
+# Not an override of docker-compose.yml, unlike COMPOSE_HTTP: a different broker
+# image with a different storage-format path shares nothing with the level-3
+# stack. The compose file names its own project so `down -v` cannot cross over.
+COMPOSE_K4   := docker compose -f docker-compose.kafka4.yml
+
 # Pinned to match .github/workflows/ci.yml: golangci-lint adds checks in minor
 # releases, so a floating local install disagrees with CI at the worst moment.
 GOLANGCI_VERSION := v2.12.2
@@ -20,7 +25,8 @@ GOLANGCI_VERSION := v2.12.2
 .PHONY: all build version run run-stdout test test-race vet fmt fmt-check lint cover check clean \
         test-local-up test-local-down test-local-logs test-local-restart test-local-urp \
         build-mock run-mock run-http test-http test-http-up test-http-down \
-        test-http-logs test-http-restart test-http-verify
+        test-http-logs test-http-restart test-http-verify \
+        test-kafka4 test-kafka4-up test-kafka4-down test-kafka4-logs test-kafka4-restart
 
 all: check build
 
@@ -151,3 +157,22 @@ test-http-verify:
 	$(COMPOSE_HTTP) logs mock-ingest; \
 	$(COMPOSE_HTTP) down -v >/dev/null 2>&1; \
 	exit $$rc
+
+# Kafka 4.1: the KIP-848 and KIP-932 paths cp-kafka 7.5.0 cannot answer. One
+# command brings up the broker, raises share.version, starts a classic consumer,
+# a new-protocol consumer and a share consumer, and follows the agent watching
+# all three. docs/TESTING.md records what came back.
+test-kafka4: test-kafka4-up
+	cd test && $(COMPOSE_K4) logs -f agent
+
+test-kafka4-up:
+	cd test && $(COMPOSE_K4) up -d --build
+
+test-kafka4-logs:
+	cd test && $(COMPOSE_K4) logs -f agent
+
+test-kafka4-down:
+	cd test && $(COMPOSE_K4) down -v
+
+test-kafka4-restart:
+	cd test && $(COMPOSE_K4) restart agent

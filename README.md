@@ -944,6 +944,24 @@ collector's phase-order constraint. `internal/mockingest/check.go` has the full 
 to a rejection and is for CI only, since a rejection is terminal and permanently discards
 the batch.
 
+### Testing against Kafka 4.x
+
+`ConsumerGroupDescribe` (KIP-848) and `ShareGroupDescribe` (KIP-932) do not exist on the
+cp-kafka 7.5.0 broker every environment above runs, so the capability probe switches both
+phases off there and only their degradation path gets exercised.
+`test/docker-compose.kafka4.yml` is Apache Kafka 4.1, one KRaft node with `share.version=1`
+enabled, driving a classic consumer, a `group.protocol=consumer` consumer and a share consumer
+against one topic at once:
+
+```bash
+make test-kafka4        # broker, share.version=1, traffic, three consumers, agent
+make test-kafka4-logs   # follow the agent again later
+make test-kafka4-down   # stop and delete the volumes
+```
+
+[docs/TESTING.md](docs/TESTING.md) records what each phase actually answered there, including
+the one that still does not.
+
 ## Build and develop
 
 ```bash
