@@ -313,10 +313,37 @@ type BrokerAPIRPC struct {
 	BytesRead    int64 `json:"bytes_read"`
 }
 
-// DefaultLatencyBoundsUs is the bucket layout for every LatencyHistogram the
+// defaultLatencyBoundsUs is the bucket layout for every LatencyHistogram the
 // agent emits, in microseconds. It is fixed rather than configurable so that
 // buckets add across agents and across cycles without re-bucketing.
-var DefaultLatencyBoundsUs = []int64{500, 1_000, 2_500, 5_000, 10_000, 25_000, 50_000, 100_000, 500_000, 1_000_000, 5_000_000}
+//
+// It is unexported, and nothing hands the variable itself out: a slice is a
+// handle on one backing array, so assigning it into a histogram would give every
+// histogram the agent ever emits the SAME array. internal/kafka's snapshot
+// installs buckets on one histogram per broker row and two per API row on every
+// cycle, so a single element write -- through any one histogram, or through the
+// variable -- would silently re-bucket all of them, every histogram created
+// afterwards, and every batch after that. Nothing in the payload would show it:
+// bounds_us would still ship and counts would still sum to count, leaving a
+// backend interpolating against bounds the observations were never bucketed by.
+// Copying is the whole defence, and it is what DefaultLatencyBoundsUs and
+// EnsureBuckets both do.
+var defaultLatencyBoundsUs = []int64{500, 1_000, 2_500, 5_000, 10_000, 25_000, 50_000, 100_000, 500_000, 1_000_000, 5_000_000}
+
+// DefaultLatencyBoundsUs returns the fixed bucket layout, in microseconds, as a
+// fresh copy -- the same contract as collector.SectionNames, and for the same
+// reason: a caller that needs to know the layout must not be handed something it
+// can write through.
+//
+// It stays exported because the layout is identical on every histogram in every
+// batch, which is exactly what lets a backend store it once per batch instead of
+// once per histogram; the alternative to naming it here is a backend hardcoding
+// eleven bounds that this file is free to change.
+func DefaultLatencyBoundsUs() []int64 {
+	out := make([]int64, len(defaultLatencyBoundsUs))
+	copy(out, defaultLatencyBoundsUs)
+	return out
+}
 
 // LatencyHistogram is counts plus a sum plus explicit bucket bounds, and
 // deliberately NOT a percentile. A p99 computed per cycle cannot be aggregated:
@@ -343,10 +370,17 @@ type LatencyHistogram struct {
 // a healthy broker's connect_latency sees no dial for hours while its row is
 // created every cycle. A consumer that zips bounds with counts, or adds counts
 // element-wise across brokers, would otherwise hit a null on nearly every batch.
+//
+// The layout is COPIED per histogram rather than shared, which is what makes
+// "a histogram is only ever re-bucketed through itself" true; see
+// defaultLatencyBoundsUs for what one shared backing array costs. The copy is
+// eleven int64s against a batch that already allocates a row per broker per API
+// key, so the price is not worth reasoning about -- a bucket layout that can
+// move under a histogram already shipped is.
 func (h *LatencyHistogram) EnsureBuckets() {
 	if h.Counts == nil {
-		h.BoundsUs = DefaultLatencyBoundsUs
-		h.Counts = make([]int64, len(DefaultLatencyBoundsUs)+1)
+		h.BoundsUs = DefaultLatencyBoundsUs()
+		h.Counts = make([]int64, len(h.BoundsUs)+1)
 	}
 }
 
