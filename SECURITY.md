@@ -54,12 +54,19 @@ Every call the agent makes falls inside those five grants. `ListOffsets` carries
 isolation level that the broker applies only *after* authorization, so reading the last
 stable offset needs no grant beyond the one already required for the high watermark.
 `DescribeLogDirs` returns directory paths and per-replica byte sizes — never record
-content — and the broker gates it on `DESCRIBE` on `CLUSTER`.
+content — and the broker gates it on `DESCRIBE` on `CLUSTER`, which is measured rather than
+assumed: see below.
 
-Two APIs were evaluated and their authorization measured against a live broker with a
+Four APIs have been evaluated and their authorization measured against a live broker with a
 non-permissive authorizer. `OffsetForLeaderEpoch` is satisfied by the existing grants.
-`DescribeProducers` requires `READ` on `TOPIC` and is therefore **excluded from this
-agent by design**, because `READ` on a topic would permit consuming its records.
+`DescribeLogDirs` and `ListPartitionReassignments` are too, measured in both directions: as a
+principal holding nothing but the three `DESCRIBE` grants the agent's `log_dirs` and
+`reassignments` sections both report `ok` — the second on a deliberately under-replicated
+partition, because that request fires on no other cycle — and revoking `DESCRIBE` on
+`CLUSTER` turns both `unauthorized` with `CLUSTER_AUTHORIZATION_FAILED`. There is no sixth
+grant behind either of them. `DescribeProducers` requires `READ` on `TOPIC` and is therefore
+**excluded from this agent by design**, because `READ` on a topic would permit consuming its
+records.
 
 `DESCRIBE_CONFIGS` is the one grant outside the original three DESCRIBE grants. It is
 read-only and it is **not** `ALTER_CONFIGS`: it permits reading configuration, never
@@ -96,7 +103,10 @@ You can verify this rather than take our word for it: grant the five ACLs
 above and nothing else, run the agent, and confirm every section reports `ok`
 or `skipped`. `README.md` has the `kafka-acls`, MSK, Confluent Cloud, and
 Redpanda forms of those grants, and `test/` brings up a local KRaft cluster
-with SASL/SCRAM and `StandardAuthorizer` enforcing them.
+with SASL/SCRAM and `StandardAuthorizer` enforcing them. `make test-local-urp`
+adds the one condition that cluster cannot produce on its own — an
+under-replicated partition — and fails unless `reassignments` answers under
+those grants.
 
 One deliberate difference in that environment: `test/setup-acls.sh` grants only
 the three `DESCRIBE` operations, so `topic_configs` and `broker_configs` report

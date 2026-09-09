@@ -1,0 +1,67 @@
+# A second broker for the level-3 cluster, so a partition can be made
+# under-replicated on purpose.
+#
+# This is an OVERRIDE layered on ./docker-compose.yml, never a stack of its
+# own: the SASL/SCRAM credentials, the StandardAuthorizer and the three
+# DESCRIBE-only ACLs from setup-acls.sh are reused untouched, and this file
+# adds no ACL of any kind.
+#
+# WHY A SECOND BROKER. ListPartitionReassignments is the one request the agent
+# issues that no healthy cluster provokes: the phase fires on a partition it
+# has ALREADY observed under-replicated, and on a single broker whose every
+# topic is replication-factor 1 a URP is arithmetically impossible. Without a
+# second replica to take away, the level-3 rig can never ask the question
+# SECURITY.md answers — that DESCRIBE on CLUSTER is the whole of that API's
+# authorization, and that there is no sixth grant hiding behind it.
+#
+#   make test-local-urp     # bring this up, force the URP, check the answer
+#   make test-local-down    # tears this down too, via --remove-orphans
+#
+# Notes on the node:
+#   * broker-only, so it needs no --add-scram at format time: the admin
+#     credential lives in the metadata log the controller on kafka:9093
+#     already holds, and this node replicates it rather than writing it.
+#   * The CONTROLLER listener stays PLAINTEXT with User:ANONYMOUS as a super
+#     user, exactly as in the base file and for the same reason.
+#   * It publishes no host port. Nothing outside the compose network talks to
+#     it; the agent reaches it as kafka2:9092.
+
+services:
+  kafka2:
+    image: confluentinc/cp-kafka:7.5.0
+    hostname: kafka2
+    container_name: streamsight-test-kafka2
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 2
+      KAFKA_PROCESS_ROLES: broker
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: BROKER
+
+      KAFKA_LISTENERS: BROKER://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka2:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: BROKER:SASL_PLAINTEXT,CONTROLLER:PLAINTEXT
+
+      KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
+      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: SCRAM-SHA-512
+      KAFKA_LISTENER_NAME_BROKER_SCRAM-SHA-512_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="admin-secret";'
+
+      KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+      KAFKA_SUPER_USERS: User:admin;User:ANONYMOUS
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "false"
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        /etc/confluent/docker/configure
+        kafka-storage format --cluster-id "$${CLUSTER_ID}" -c /etc/kafka/kafka.properties --ignore-formatted
+        exec /etc/confluent/docker/run

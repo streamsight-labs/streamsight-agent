@@ -104,12 +104,64 @@ The grants are `DESCRIBE` on `CLUSTER`, on `TOPIC '*'`, and on `GROUP '*'` — s
 `test/setup-acls.sh`. This is the environment that keeps `SECURITY.md` honest: if a new
 collector needs a fourth grant, this is where it fails.
 
-**Expect `topic_configs` and `broker_configs` to report `unauthorized` here.** That is
-correct, not a bug. `COLLECT_CONFIGS` defaults on and needs `DESCRIBE_CONFIGS` on `TOPIC` and
-`CLUSTER`, which `setup-acls.sh` deliberately does not grant — so this environment doubles as
-the standing test that the two config sections degrade cleanly and nothing else degrades with
-them. Set `COLLECT_CONFIGS=false` to stop asking, or add the grants if you want to exercise
-the success path.
+**`topic_configs` and `broker_configs` report `unauthorized` here, and that is correct.**
+`COLLECT_CONFIGS` defaults on and needs `DESCRIBE_CONFIGS` on `TOPIC` and `CLUSTER`, which
+`setup-acls.sh` deliberately does not grant — so this environment doubles as the standing
+test that the two config sections degrade cleanly and nothing else degrades with them.
+
+You will not see it in the first batch, and that is not the doc being wrong. The configs
+phase samples on the cycles where `(n + 5) % CONFIGS_EVERY == 0`, so at the shipped `360` the
+first one is cycle 355 — an hour in at this file's 10s interval, and every batch before it
+reads `skipped`. Add `CONFIGS_EVERY=1` to the agent's environment to see the refusal
+immediately: `topic_configs` then reports `TOPIC_AUTHORIZATION_FAILED` (error code 29) and
+`broker_configs` reports `CLUSTER_AUTHORIZATION_FAILED` (31), both on batch 1. Set
+`COLLECT_CONFIGS=false` to stop asking, or add the two grants to exercise the success path.
+
+### What this rig has settled about the CLUSTER grant
+
+Two of the five grants in `SECURITY.md` cover APIs the broker gates on `DESCRIBE` of
+`CLUSTER`, and both are measured here rather than read off Kafka's authorization rules.
+
+`DescribeLogDirs` needs nothing arranged. The log-dirs phase carries cadence offset 0, so it
+samples on cycle 0 and **the first batch of an unmodified `make test-local-up` answers the
+question**. As `User:streamsight-agent` holding nothing but the three grants it reports
+`{"name":"log_dirs","status":"ok"}` with per-replica sizes and the KIP-827
+`total_bytes`/`usable_bytes` — cp-kafka 7.5.0 advertises `DescribeLogDirs` v4, so that is the
+raw sharded path and not the kadm fallback. Take the grant away and restart the agent and the
+section turns `unauthorized` with `CLUSTER_AUTHORIZATION_FAILED` (error code 31) while every
+other section stays `ok` and the `cluster` block comes back byte-identical. That last part is
+what makes the control readable: cluster metadata does not need that grant on this broker, so
+removing it isolates one API instead of blanking the batch.
+
+Restart with `make test-local-restart`, never `up -d`. `up` re-runs `kafka-init`, which
+recreates the very grant you just removed and hands you a clean batch that looks like a
+refutation. The restart is also what puts the log-dirs phase back on cycle 0, so you read the
+answer on the next batch instead of waiting out `LOG_DIRS_EVERY`.
+
+`ListPartitionReassignments` needs an under-replicated partition, which a single broker
+holding only replication-factor-1 topics cannot produce. `make test-local-urp` builds the
+missing condition: `test/docker-compose.urp.yml` layers a second SASL broker onto this same
+stack — no new ACL, the three grants are still all there is — and `test/urp-probe.sh` creates
+a replicated topic, stops that broker, waits out `replica.lag.time.max.ms` for the ISR to
+shrink, then reads the next batch.
+
+```bash
+make test-local-urp     # non-zero unless reassignments comes back ok
+make test-local-down    # tears the second broker down too
+```
+
+Under those three grants and three observed URPs the section reports
+`{"name":"reassignments","status":"ok"}` with no rows — which is right, because nothing is
+actually moving and the controller answers only for live reassignments. Revoke `DESCRIBE` on
+`CLUSTER` with the URPs still standing and it reports `unauthorized` with error code 31,
+alongside `log_dirs`. What that settles is the authorization and the request; the row shaping
+in `buildReassignments` has still never had a real reassignment to shape.
+
+Expect collateral for the length of a URP run: `log_dirs` goes `partial` with an
+`unknown broker` error for the shard that cannot answer, and the `topics*` sections go
+`partial` with `LEADER_NOT_AVAILABLE` while the election runs. A baseline with a standing
+exception in it is not a baseline, which is why the second broker is an overlay and not part
+of `make test-local-up`.
 
 ### Testing a degraded permission
 
@@ -272,7 +324,7 @@ For reference, the last full measurement — 390 partitions, 24 groups, 3 broker
 defaults — was **174 KB raw / 16.9 KB gzipped** steady, ≈8.8 GB/month per cluster.
 Partitions and committed-offset rows are the axes; broker count is not.
 
-### Two things a chaos run has already taught, so you don't re-learn them
+### Three things a chaos run has already taught, so you don't re-learn them
 
 - **Do not try to detect rebalances by sampling group state.** Measured against
   `chaos/rebalance-storm`: 31 real member-set changes, and a state sample read `Stable`
@@ -285,6 +337,17 @@ Partitions and committed-offset rows are the axes; broker count is not.
   both `range` and `cooperative-sticky`. A detector keyed on generation deltas reads a
   storming cluster as perfectly stable. Use member-ID churn, or `group_epoch` on a
   KIP-848 cluster.
+- **`chaos/broker-chaos` does reach the `reassignments` phase, and only the phase.** Three
+  stop/start windows over a 41-batch run at a 5s interval, 6 under-replicated partitions in
+  each, and the section flipped `skipped` → `ok` for the length of every window with a real
+  request behind it (0–87 ms) and no rows, since a stopped broker is a URP that nothing is
+  reassigning. One case is not that clean: an agent started while the *controller* is the
+  broker that is down reported `failed` for its first three batches, with a `transport` error
+  of `context deadline exceeded` against the section's own budget and no Kafka error code —
+  the phase refusing to call an unreachable controller a clean "nothing is moving", which is
+  the behaviour you want and is easy to misread as a permission problem. What this cluster
+  cannot settle is the ACL: Khaos runs no authorizer, so it proves the trigger and the
+  request, never the grant. `make test-local-urp` is where the grant is proved.
 
 ---
 
@@ -292,11 +355,15 @@ Partitions and committed-offset rows are the axes; broker count is not.
 
 Honest gaps, so nobody assumes a green test run covers them:
 
-- **`DescribeLogDirs` under `DESCRIBE CLUSTER`** is shipping code and now defaults on, but
-  the end-to-end ACL run has never had `COLLECT_LOG_DIRS` enabled. Flipping it against the
-  level-3 environment settles the claim in minutes, and it is the cheapest open item here.
-- **`ListPartitionReassignments` under `DESCRIBE CLUSTER`** fires only on an observed
-  under-replicated partition. `chaos/broker-chaos` is the way to produce one.
+- **The `DESCRIBE_CONFIGS` success path.** `test/setup-acls.sh` withholds both config grants
+  on purpose, so what the level-3 rig measures is the refusal — `topic_configs` with
+  `TOPIC_AUTHORIZATION_FAILED`, `broker_configs` with `CLUSTER_AUTHORIZATION_FAILED`. No run
+  has granted the two and watched the sections come back `ok`.
+- **Reassignment rows.** `reassignments` has been made to answer under the real ACLs, on a
+  forced under-replicated partition, and it answered `ok` with an empty list — correct,
+  because a stopped broker is a URP that nothing is moving. So `buildReassignments` has still
+  never had `adding_replicas`/`removing_replicas` to shape. The authorization is settled; the
+  payload is not.
 - **The KIP-848 success path.** `ConsumerGroupDescribe` runs as an overlay on the classic
   describe and only its *degradation* path is verified (cp-kafka 7.5.0 disables the phase at
   startup, correctly). No Kafka 4.x cluster has answered it.

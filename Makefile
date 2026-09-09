@@ -18,7 +18,7 @@ COMPOSE_HTTP := docker compose -f docker-compose.yml -f docker-compose.http.yml
 GOLANGCI_VERSION := v2.12.2
 
 .PHONY: all build version run run-stdout test test-race vet fmt fmt-check lint cover check clean \
-        test-local-up test-local-down test-local-logs test-local-restart \
+        test-local-up test-local-down test-local-logs test-local-restart test-local-urp \
         build-mock run-mock run-http test-http test-http-up test-http-down \
         test-http-logs test-http-restart test-http-verify
 
@@ -83,14 +83,29 @@ clean:
 test-local-up:
 	cd test && docker compose up -d
 
+# --remove-orphans, not decoration: docker-compose.urp.yml's second broker is
+# not in this file's service list, so a plain `down -v` removes the base
+# services, leaves that broker running with nothing to talk to, and then fails
+# to remove the network with "Resource is still in use" — which the next
+# `up` inherits. Measured, not defensive.
 test-local-down:
-	cd test && docker compose down -v
+	cd test && docker compose down -v --remove-orphans
 
 test-local-logs:
 	cd test && docker compose logs -f agent
 
 test-local-restart:
 	cd test && docker compose restart agent
+
+# The only way to make the agent issue ListPartitionReassignments: the phase is
+# trigger-driven, and a single broker whose every topic is replication-factor 1
+# never gives it a trigger. The script layers test/docker-compose.urp.yml over
+# the level-3 stack for a second broker, forces an under-replicated partition,
+# and exits non-zero unless the reassignments section comes back ok under
+# nothing but the three DESCRIBE grants. Needs jq; `make test-local-down`
+# cleans up.
+test-local-urp:
+	./test/urp-probe.sh
 
 build-mock:
 	go build -o $(MOCK_BIN) $(MOCK_PKG)

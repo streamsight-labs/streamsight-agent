@@ -733,18 +733,27 @@ you do), then grant the agent these five permissions and nothing else.
 That is the complete set. `ApiVersions` (the startup probes) is answered before
 authentication completes and carries no ACL at all.
 
-The three `DESCRIBE` grants were verified end to end against a broker with
+The three `DESCRIBE` grants are verified end to end against a broker with
 `allow.everyone.if.no.acl.found=false` and exactly that set (see
 [Local testing](#local-testing)), in both `stdout` and `http` export mode; removing any one
 of them degrades the corresponding section to `unauthorized` rather than silently emptying
-it. Two entries above are read from the broker's authorization rules rather than exercised:
-`DescribeLogDirs`, because `COLLECT_LOG_DIRS` still defaulted **off** when that run was made
-and defaults **on** now, and `ListPartitionReassignments`, because its request fires only on
-an under-replicated partition and the test cluster never had one. `OffsetForLeaderEpoch`
-**was** verified directly, with a negative control. The two `DESCRIBE_CONFIGS` rows postdate
-that run and have not been through it. Under a restrictive ACL, check the `log_dirs` section
-on the first cycle it runs — it is on the default path now, so an `unauthorized` or
-`partial` there will appear without anyone opting in.
+it. The two `CLUSTER`-gated APIs in the first row are measured the same way, each with its
+own negative control. Running as that principal and holding nothing but those three grants,
+`log_dirs` comes back `ok` with per-replica bytes and the KIP-827 volume figures on the very
+first batch — the phase samples on cycle 0, so nobody has to wait for it — and
+`reassignments` comes back `ok` on a deliberately under-replicated partition, which
+`make test-local-urp` exists to produce because that phase fires on no other trigger. Revoke
+`DESCRIBE` on `CLUSTER` and both turn `unauthorized` with `CLUSTER_AUTHORIZATION_FAILED`. On
+the healthy single-broker rig that revocation leaves every other section `ok` and the
+`cluster` block byte-identical, which is what makes the control readable: cluster metadata
+does not need the grant, so taking it away isolates `DescribeLogDirs` instead of blanking the
+batch. `OffsetForLeaderEpoch` is verified directly, with its own negative control.
+
+The two `DESCRIBE_CONFIGS` rows are the ones still read from the broker's authorization rules
+rather than exercised. `test/setup-acls.sh` withholds them on purpose, so what the local rig
+measures is the refusal — `topic_configs` with `TOPIC_AUTHORIZATION_FAILED`, `broker_configs`
+with `CLUSTER_AUTHORIZATION_FAILED` — and no run has granted them and watched the two
+sections come back `ok`.
 
 [SECURITY.md](SECURITY.md) states the same grants as a product invariant, together with
 what the agent sends where and what a batch does and does not contain — that is the file to
