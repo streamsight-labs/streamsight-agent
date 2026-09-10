@@ -35,16 +35,14 @@ only. After it, the latest minor is supported.
 
 ## What this agent can and cannot do
 
-This is the part a security team evaluating whether to run the binary against a
-production Kafka cluster usually wants first. These are design invariants, not
-current behaviour that may drift — a change that breaks one of them is a
-product decision, not an implementation detail.
+These are design invariants, not current behaviour that may drift — a change
+that breaks one of them is a product decision, not an implementation detail.
 
 **Kafka permissions.** The agent requires **exactly** five read-only grants:
 
 | Resource | Operation | Used for |
 |---|---|---|
-| `CLUSTER` | `DESCRIBE` | `Metadata` (brokers, controller, cluster ID), `ListGroups`, `ApiVersions`, `DescribeLogDirs` (`COLLECT_LOG_DIRS`, default on), and `ListPartitionReassignments` (issued only on an observed under-replicated partition) |
+| `CLUSTER` | `DESCRIBE` | `Metadata` (brokers, controller, cluster ID), `ListGroups`, `DescribeLogDirs` (`COLLECT_LOG_DIRS`, default on), and `ListPartitionReassignments` (issued only on an observed under-replicated partition). `ApiVersions` — the startup probe — is answered before authentication completes and carries no ACL at all |
 | `TOPIC` | `DESCRIBE` | Topic and partition metadata; every `ListOffsets` flavour — log start, high watermark, the `read_committed` listing that yields the last stable offset, the by-timestamp throughput window, max timestamp, and the tiered-storage sentinels, all one API key the broker authorizes before reading the isolation level or the timestamp; `OffsetForLeaderEpoch`; and the topics inside `OffsetFetch` |
 | `GROUP` | `DESCRIBE` | `DescribeGroups`, `ConsumerGroupDescribe` (KIP-848 groups), `OffsetFetch`, and — when `COLLECT_SHARE_GROUPS` is enabled — `ShareGroupDescribe` and `DescribeShareGroupOffsets` |
 | `TOPIC` | `DESCRIBE_CONFIGS` | `DescribeConfigs` for topic configuration (`COLLECT_CONFIGS`, default on) |
@@ -75,9 +73,12 @@ read-only and it is **not** `ALTER_CONFIGS`: it permits reading configuration, n
 changing it. It is required rather than optional because what it reads is a correction, not
 a feature — see below. A cluster that refuses it can run the agent with
 `COLLECT_CONFIGS=false`; the two config sections then report `unauthorized` and no other
-section is affected. The agent requests a fixed allowlist of 21 keys, and it never ships a value the broker
-marks `SENSITIVE` — Kafka strips those server-side, and the agent strips them again on the
-way out rather than trusting that it always will. Every listener, SASL, SSL and path-shaped
+section is affected. `DescribeConfigs` names no keys on the wire, so the broker returns every configuration
+entry it holds and the agent projects that response onto a fixed 21-key allowlist before
+anything is emitted — the filtering is client-side, and nothing outside those 21 keys ever
+reaches a batch. It never ships a value the broker marks `SENSITIVE`: Kafka strips those
+server-side, and the agent strips them again on the way out rather than trusting that it
+always will. Every listener, SASL, SSL and path-shaped
 key is excluded from the allowlist, because the agent has no consumer for any of them.
 
 The reason it is required: without `cleanup.policy` nothing can tell that a topic is
@@ -131,13 +132,12 @@ member *metadata*, plus committed offsets and log-end offsets — that is,
 numbers and names. Names are not necessarily non-sensitive: topic names, group
 names, client IDs, and consumer group `metadata` blobs are included verbatim,
 and organisations do sometimes put customer identifiers in a topic name.
-`TOPIC_EXCLUDE` and `GROUP_EXCLUDE` (comma-separated lists of names, each
-entry an exact name unless wrapped in slashes to make it a regex, compiled at
-startup and applied in the agent before anything is exported) are the supported
-way to keep those out of a batch. Naming a topic exactly is the common case and
-the safe one: the entry is escaped, so a name containing a dot excludes that
-topic and no other. Record keys, record values, and headers are never collected in
-any mode.
+`TOPIC_EXCLUDE` and `GROUP_EXCLUDE` are the supported way to keep those out of
+a batch: they are applied in the agent before anything is exported, and an entry
+is an exact name unless wrapped in slashes to make it a regex, so a name
+containing a dot excludes that topic and no other (README,
+[Configuration](README.md#configuration)). Record keys, record values, and
+headers are never collected in any mode.
 
 **Credentials.** `KAFKA_SASL_PASSWORD` and `API_KEY` are read from the
 environment, are held only in memory, and are redacted from every log line and
@@ -163,9 +163,7 @@ Out of scope: vulnerabilities in Kafka itself, in your broker configuration, or
 in the network path; findings that require an attacker who already has the
 agent's credentials or a shell in its container; missing hardening that has no
 demonstrated impact; and DoS achieved by pointing the agent at a cluster with a
-pathological entity count (a known and documented limitation: nothing truncates
-the inventory, by design — a batch describes everything it was pointed at or a
-section reports why it could not, so the only bound on batch size is the
-selection surface — `TOPIC_INCLUDE`/`TOPIC_EXCLUDE`, `GROUP_INCLUDE`/`GROUP_EXCLUDE`,
-`INCLUDE_INTERNAL_TOPICS` and the broker-side `GROUP_STATES` filter — which are
-operator decisions the payload echoes back in `selection`).
+pathological entity count — a known and documented limitation: nothing truncates
+the inventory by design, so the only bound on batch size is the selection
+surface, which is an operator decision the payload echoes back in `selection`
+(README, [Cardinality caps](README.md#cardinality-caps)).

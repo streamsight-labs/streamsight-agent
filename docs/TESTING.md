@@ -28,13 +28,15 @@ make check        # gofmt check + vet + test — the pre-push gate
 make cover        # coverage as information, never a gate
 ```
 
-`make check` is what CI's `go` job runs. **Lint is deliberately not in `check`** — it is a
-separate blocking CI job, so a lint bump can't silently start failing your local test loop.
+CI's `go` job is a superset of `make check`: the same gofmt, vet and test steps plus
+`go build ./...`, `-race` with coverage, and govulncheck. **Lint is deliberately not in
+`check`** — it is a separate blocking CI job, so a lint bump can't silently start failing your
+local test loop.
 
 Two tests are worth knowing about by name.
 
-**`TestSchemaV1Frozen`** (`internal/mockingest`) compares a generated batch against the
-golden `internal/mockingest/testdata/schema_v1.txt`. It is the **only** thing that actually
+**`TestSchemaV1Frozen`** (`internal/mockingest`) compares a reflected field-path listing of
+`metrics.Batch` against the golden `internal/mockingest/testdata/schema_v1.txt`. It is the **only** thing that actually
 enforces schema v1: the mock ingest's `DisallowUnknownFields` is inert while the agent and
 the mock compile from the same tree, so without the golden a field could be added on both
 sides at once and nothing would notice. If you change the wire shape deliberately:
@@ -88,17 +90,11 @@ All seventeen sections appear in **every** batch, in a fixed order, with `status
 for a phase that did not run. An absent section is a defect, not a configuration.
 
 `truncation` is about `errors[]` and nothing else, which is why the recipe above is a
-one-liner rather than a per-entity audit. No cap shortens the inventory: a batch describes
-every topic, partition, group and offset it was pointed at, or the section that could not be
-completed says so in `sections[].status`. There is deliberately no third state where a
-payload describes part of a cluster as though it were the whole one, and that is what makes
-`topics[].partition_count`, `groups[].member_count` and `offsets[].offset_count` always equal
-the length of the list beside them — a mismatch is a sender bug, and the conformance mock in
-level 4 fails it as one. What a deployment does not want to watch belongs in `TOPIC_INCLUDE`
-and friends, and those travel with the data in the batch's `selection` block so the far end
-can tell "the cluster has 40 topics" from "the agent was pointed at 40 of them". `selection`
-is absent when nothing was filtered, which is the only positive signal that a batch covers
-everything.
+one-liner rather than a per-entity audit: no cap shortens the inventory, and the entity
+counts always equal the length of the list beside them — the level-4 mock fails a mismatch
+as a sender bug. See README, [Cardinality caps](../README.md#cardinality-caps) and
+[Reading the data correctly](../README.md#reading-the-data-correctly), for the design and
+for what `selection` says about coverage.
 
 ---
 
@@ -123,8 +119,7 @@ collector needs a fourth grant, this is where it fails.
 `setup-acls.sh` deliberately does not grant — so this environment doubles as the standing
 test that the two config sections degrade cleanly and nothing else degrades with them.
 
-You will not see it in the first batch, and that is not the doc being wrong. The configs
-phase samples on the cycles where `(n + 5) % CONFIGS_EVERY == 0`, so at the shipped `360` the
+You will not see it in the first batch. The configs phase samples on the cycles where `(n + 5) % CONFIGS_EVERY == 0`, so at the shipped `360` the
 first one is cycle 355 — an hour in at this file's 10s interval, and every batch before it
 reads `skipped`. Add `CONFIGS_EVERY=1` to the agent's environment to see the refusal
 immediately: `topic_configs` then reports `TOPIC_AUTHORIZATION_FAILED` (error code 29) and
@@ -168,8 +163,8 @@ Under those three grants and three observed URPs the section reports
 `{"name":"reassignments","status":"ok"}` with no rows — which is right, because nothing is
 actually moving and the controller answers only for live reassignments. Revoke `DESCRIBE` on
 `CLUSTER` with the URPs still standing and it reports `unauthorized` with error code 31,
-alongside `log_dirs`. What that settles is the authorization and the request; the row shaping
-in `buildReassignments` has still never had a real reassignment to shape.
+alongside `log_dirs`. What that settles is the authorization and the request, not the row
+shaping — see *Still unverified*.
 
 Expect collateral for the length of a URP run: `log_dirs` goes `partial` with an
 `unknown broker` error for the shard that cannot answer, and the `topics*` sections go
@@ -248,11 +243,13 @@ lists them all.
 
 ### What it checks
 
-The codes group by prefix: `transport.*` (gzip and `Content-Encoding` agreement,
-`Idempotency-Key` format and uniqueness, body size, compression ratio), `schema.*` and
-`envelope.*` (strict decode with `DisallowUnknownFields`, `batch_seq` monotonicity and gap
-detection, clock skew), `sections.*` (the seventeen-name list, its order, per-section
-`error_count`, phase-order assertions), `errors.*`, and `data.*`.
+84 codes across eleven prefixes: `data.*` (24), `sections.*` (13, the seventeen-name list and
+its order, per-section `error_count`, phase-order assertions), `transport.*` (12, gzip and
+`Content-Encoding` agreement, body size, compression ratio), `envelope.*` and `agent.*` (7 each,
+including `envelope.idempotency_key_format` and clock skew), `errors.*` (6), `idempotency.*`
+(5 — replay, body mismatch, and `batch_seq` regression and gap detection), `truncation.*` and
+`body.*` (3 each), `selection.*` and `schema.*` (2 each, the latter being the strict decode with
+`DisallowUnknownFields`).
 
 The one that matters most is **`data.negative_lag`** — a committed offset above the high
 watermark for the same partition. It is the runtime detector for the collector's phase-order
@@ -341,16 +338,15 @@ Partitions and committed-offset rows are the axes; broker count is not.
 ### Three things a chaos run has already taught, so you don't re-learn them
 
 - **Do not try to detect rebalances by sampling group state.** Measured against
-  `chaos/rebalance-storm`: 31 real member-set changes, and a state sample read `Stable`
-  almost every time — a rebalance completes well inside a 5s poll, so the sampler lands on
-  either side of it. That is a sampling failure, not a tuning one, and halving the interval
+  `chaos/rebalance-storm`: over 33 batches there were 31 real member-set changes, of which
+  sampling group state caught 2 — every other sample read `Stable`. A rebalance completes
+  well inside a 5s poll, so the sampler lands on either side of it. That is a sampling failure, not a tuning one, and halving the interval
   does not fix it. Detect rebalances from member-ID churn in `groups[].members[]`: it is in
   every batch at zero request cost, and it caught all 31.
-- **`generation` is `-1` in practice.** It comes from the sticky-assignor hint, not the
-  group's authoritative generation, and the standard Java consumer leaves it at `-1` with
-  both `range` and `cooperative-sticky`. A detector keyed on generation deltas reads a
-  storming cluster as perfectly stable. Use member-ID churn, or `group_epoch` on a
-  KIP-848 cluster.
+- **`generation` is `-1` in practice**, so a detector keyed on generation deltas reads a
+  storming cluster as perfectly stable. Use member-ID churn, or `group_epoch` on a KIP-848
+  cluster; README's
+  [Known gaps](../README.md#known-gaps-in-the-current-schema) has the mechanism.
 - **`chaos/broker-chaos` does reach the `reassignments` phase, and only the phase.** Three
   stop/start windows over a 41-batch run at a 5s interval, 6 under-replicated partitions in
   each, and the section flipped `skipped` → `ok` for the length of every window with a real

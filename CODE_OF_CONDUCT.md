@@ -10,13 +10,10 @@ review comments alike.
 
 Report a violation through [GitHub private vulnerability reporting][gh-pvr] —
 the *Report a vulnerability* button under this repository's **Security** tab.
-That is a security channel being reused, which is deliberate and worth
-explaining: it is the only private channel this repository has, and the
-alternative — printing an email address in this file — would be advertising an
-inbox nobody has committed to reading. A code of conduct whose contact goes
-nowhere is worse than none at all, because it promises a process that does not
-exist. `SECURITY.md` makes the same argument about the same channel and gives
-the fallback for when the button is unavailable to you.
+Reusing the security channel is deliberate: it is the only private channel this
+repository has, and a code of conduct whose contact goes nowhere is worse than
+none at all. [SECURITY.md](SECURITY.md) makes the same argument about the same
+channel and gives the fallback for when the button is unavailable to you.
 
 Reports are read by the maintainers, kept confidential, and answered. What
 follows a substantiated report is at the maintainers' discretion and ranges
