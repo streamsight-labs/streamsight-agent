@@ -46,9 +46,9 @@ func compilePatterns(list []string) ([]*regexp.Regexp, error) {
 	return out, nil
 }
 
-// compilePattern turns one list entry into a matcher, borrowing kminion's
-// convention: an entry is a literal unless it is wrapped in slashes, in which
-// case the text between them is a regular expression.
+// compilePattern turns one list entry into a matcher: an entry is a literal
+// unless it is wrapped in slashes, in which case the text between them is a
+// regular expression.
 //
 // The literal form is escaped and anchored, so `orders.events` matches the
 // topic of exactly that name and nothing else. That escaping is the point of
@@ -99,9 +99,8 @@ func regexBody(entry string) (string, bool) {
 
 // allow reports whether name survives the pair. An empty include list matches
 // everything; a non-empty one is a union, so any single entry admits a name.
-// Exclude always wins, so a name matching both is dropped -- the same
-// precedence kminion gives its ignore lists, and the only one that lets a broad
-// include be narrowed by a specific exclusion.
+// Exclude always wins, so a name matching both is dropped -- the only
+// precedence that lets a broad include be narrowed by a specific exclusion.
 func (f *filter) allow(name string) bool {
 	if f == nil {
 		return true
