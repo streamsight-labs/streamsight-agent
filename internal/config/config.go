@@ -255,9 +255,12 @@ type Config struct {
 	// agent.New probes for that and refuses to start.
 	GroupStates []string
 
-	// Optional collectors. None needs an ACL beyond the DESCRIBE on
-	// CLUSTER/TOPIC/GROUP the agent already requires, so these are payload and
-	// latency switches, not permission switches.
+	// Optional collectors. All but CollectConfigs are payload and latency
+	// switches rather than permission switches — none of them needs an ACL
+	// beyond the DESCRIBE on CLUSTER/TOPIC/GROUP the agent already requires.
+	// CollectConfigs is the exception: it additionally needs DESCRIBE_CONFIGS
+	// on TOPIC and on CLUSTER. Without those two grants its sections report
+	// unauthorized and nothing else degrades.
 	CollectLastStableOffset bool
 	CollectConsumerGroups   bool
 	CollectLogDirs          bool
