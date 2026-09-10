@@ -8,10 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // Mode selects an exporter implementation. It aliases string so a config field
@@ -74,6 +75,12 @@ type Exporter interface {
 type Config struct {
 	Mode Mode
 
+	// Logger is where the exporter's own lines go. Only the HTTP exporter logs
+	// anything today, but the field sits here rather than in the HTTP block
+	// because it is the agent's logger, not an HTTP setting. Zero means
+	// slog.Default().
+	Logger *slog.Logger
+
 	// HTTP.
 	Endpoint   string
 	APIKey     string
@@ -107,6 +114,7 @@ func New(cfg Config) (Exporter, error) {
 			MaxRetries: cfg.MaxRetries,
 			BaseDelay:  cfg.BaseDelay,
 			Timeout:    cfg.Timeout,
+			Logger:     cfg.Logger,
 		}), nil
 
 	case ModeFile:

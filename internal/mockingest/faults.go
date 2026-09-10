@@ -66,7 +66,6 @@ func (f Faults) withDefaults() Faults {
 	return f
 }
 
-// armed reports whether any fault would ever fire.
 func (f Faults) armed() bool {
 	return f.FailFirst > 0 || f.EveryNth > 0 || f.DelayMS > 0 ||
 		f.DropEvery > 0 || f.DropFirst > 0 || f.TerminalOnce > 0

@@ -13,11 +13,11 @@ import (
 	"syscall"
 	"time"
 
-	"kafka-metrics-agent/internal/collector"
-	"kafka-metrics-agent/internal/config"
-	"kafka-metrics-agent/internal/export"
-	"kafka-metrics-agent/internal/kafka"
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/collector"
+	"github.com/streamsight-labs/streamsight-agent/internal/config"
+	"github.com/streamsight-labs/streamsight-agent/internal/export"
+	"github.com/streamsight-labs/streamsight-agent/internal/kafka"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // batchCollector is the agent's view of the collector, so the loop can be
@@ -109,6 +109,7 @@ func New(cfg *config.Config, version string) (*Agent, error) {
 
 	exporter, err := export.New(export.Config{
 		Mode:       cfg.ExportMode,
+		Logger:     logger,
 		Endpoint:   cfg.ExportEndpoint,
 		APIKey:     cfg.APIKey,
 		QueueSize:  cfg.ExportQueueSize,

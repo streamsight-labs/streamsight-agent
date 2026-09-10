@@ -28,8 +28,8 @@ services:
       dockerfile: test/Dockerfile.mock-ingest
     container_name: streamsight-mock-ingest
     ports:
-      # Change MOCK_PORT if something else already owns 8088 locally — the
-      # streamsight-control-plane stack is the usual collision.
+      # Change MOCK_PORT if something else already owns 8088 locally — another
+      # dev stack listening on 8088 is the usual collision.
       - "${MOCK_PORT:-8088}:8088"
     command:
       - --addr=:8088

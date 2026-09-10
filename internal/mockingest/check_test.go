@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden files in testdata")

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"kafka-metrics-agent/internal/export"
+	"github.com/streamsight-labs/streamsight-agent/internal/export"
 )
 
 // These drive the REAL HTTPExporter against the real validator over a real

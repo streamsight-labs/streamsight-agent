@@ -8,7 +8,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kadm"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // unknownVersion is the placeholder for a broker that answered without a
@@ -21,7 +21,6 @@ const unknownVersion = "unknown"
 // generated.go; API keys are wire constants and never change, so they are one
 // table here rather than a request constructor per line.
 const (
-	// listGroupsKey is the ListGroups API key.
 	listGroupsKey = 16
 	// listGroupsStatesFilterVersion is the first ListGroups version carrying
 	// KIP-518's StatesFilter field. kmsg only serialises the field "if version
@@ -39,7 +38,6 @@ const (
 	// absence is detected; v0 already carries everything the overlay reads.
 	consumerGroupDescribeKey = 69
 
-	// listOffsetsKey is the ListOffsets API key.
 	listOffsetsKey = 2
 	// listOffsetsIsolationVersion is the first ListOffsets version with an
 	// IsolationLevel field (KIP-98, Kafka 0.11). Below it the field is dropped
@@ -54,10 +52,8 @@ const (
 	// sends.
 	listOffsetsTimestampVersion = 1
 
-	// metadataKey is the Metadata API key.
 	metadataKey = 3
 
-	// describeLogDirsKey is the DescribeLogDirs API key.
 	describeLogDirsKey = 35
 	// describeLogDirsTotalBytesVersion is the first DescribeLogDirs version
 	// whose response dirs carry TotalBytes/UsableBytes (KIP-827).

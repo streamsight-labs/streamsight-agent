@@ -3,7 +3,7 @@ package collector
 import (
 	"context"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // collectOffsets fetches committed offsets for every listed group.

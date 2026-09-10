@@ -48,3 +48,6 @@ __debug_bin*
 
 # Local playground, not shipped
 scratch/
+
+# Per-machine Claude Code settings, which carry local absolute paths
+.claude/settings.local.json

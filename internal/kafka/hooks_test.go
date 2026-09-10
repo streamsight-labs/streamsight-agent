@@ -10,7 +10,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 var epoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)

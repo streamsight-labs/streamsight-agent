@@ -5,7 +5,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kadm"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // collectCluster issues the single metadata request the cycle is built on, and
@@ -386,7 +386,6 @@ func replicationFactor(parts []kadm.PartitionDetail) int {
 	return lowest
 }
 
-// topicListed reports whether the listing contains the topic at all.
 func topicListed(sec *section, api string, listed kadm.ListedOffsets, topic string) bool {
 	if _, ok := listed[topic]; ok {
 		return true

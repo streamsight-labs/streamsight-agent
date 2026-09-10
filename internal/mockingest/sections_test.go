@@ -4,7 +4,7 @@ import (
 	"slices"
 	"testing"
 
-	"kafka-metrics-agent/internal/collector"
+	"github.com/streamsight-labs/streamsight-agent/internal/collector"
 )
 
 // TestDefaultSectionsMatchesTheCollector is the binding that DefaultSections did

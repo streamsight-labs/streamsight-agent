@@ -8,9 +8,9 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kerr"
 
-	"kafka-metrics-agent/internal/config"
-	"kafka-metrics-agent/internal/kafka"
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/config"
+	"github.com/streamsight-labs/streamsight-agent/internal/kafka"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // All four lists have to reach the filter they belong to. A list that is

@@ -7,8 +7,8 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
 
-	"kafka-metrics-agent/internal/kafka"
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/kafka"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // clusterClient is everything this package asks of a Kafka cluster: the eighteen

@@ -8,7 +8,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kadm"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // modernBroker offers every probed key well above the version any capability

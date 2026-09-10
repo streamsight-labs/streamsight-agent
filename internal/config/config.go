@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"regexp"
 	"slices"
@@ -43,10 +45,6 @@ const (
 	DefaultExportMaxRetries = 3
 	DefaultExportBaseDelay  = time.Second
 	DefaultExportTimeout    = 10 * time.Second
-	// DefaultExportEndpoint is the hosted ingest path. Self-hosted and on-prem
-	// deployments override it; the agent POSTs to this URL verbatim and appends
-	// no path of its own, so the route is a decision on the receiving side.
-	DefaultExportEndpoint = "https://ingestion.streamsight.cloud/v1/batches"
 
 	// DefaultInterval is 5s because that is the polling cadence the product
 	// sells on every plan. It used to be 30s, and every _EVERY default below was
@@ -325,16 +323,41 @@ func Load() (*Config, error) {
 	switch c.ExportMode {
 	case ExportModeFile, ExportModeStdout:
 	case ExportModeHTTP:
-		// Defaulted here rather than at the read above, and the placement is the
-		// whole point: EXPORT_MODE is inferred as http IFF an endpoint is set, so
-		// a default assigned earlier would flip every unconfigured agent from
-		// file mode into posting at production. Inside this case the operator has
-		// already chosen http, either explicitly or by setting an endpoint.
+		// There is no default endpoint, and the omission is deliberate. Http mode
+		// is inferred IFF an endpoint is set, so the only way to reach this branch
+		// with an empty one is to have written EXPORT_MODE=http by hand -- and any
+		// value compiled in for that case would be a guess at where this operator's
+		// receiver lives. A wrong guess does not fail: the agent starts, reports a
+		// target it was never told about, and then burns its retry budget on a
+		// host that was never going to answer, once per batch, forever. Refusing to
+		// start says the same thing in one line, at the only moment anyone is
+		// watching. Every deployment has to name its own receiver anyway, because
+		// the URL is POSTed verbatim and the route is the receiving side's decision.
 		if c.ExportEndpoint == "" {
-			c.ExportEndpoint = DefaultExportEndpoint
+			p.errf("EXPORT_ENDPOINT is required when EXPORT_MODE=http")
 		}
 		if c.APIKey == "" {
 			p.errf("API_KEY is required when EXPORT_MODE=http")
+		}
+		// Parsed, not merely non-empty. This package exists so a typo fails
+		// loudly at startup, and the endpoint is the one setting where a typo
+		// otherwise fails invisibly: net/http rejects an unknown scheme per
+		// request, so EXPORT_ENDPOINT=ftp://ingest/v1 starts cleanly, reports
+		// itself configured, and then burns the whole retry budget once per
+		// batch forever with nothing but a WARN to say why. Requiring a host as
+		// well as a scheme catches the other common shape -- a bare
+		// ingest.example/v1, which url.Parse happily accepts as a relative path
+		// with no host at all, and which would fail the same way.
+		if c.ExportEndpoint != "" {
+			u, err := url.Parse(c.ExportEndpoint)
+			switch {
+			case err != nil:
+				p.errf("EXPORT_ENDPOINT %q is not a valid URL: %v", c.ExportEndpoint, err)
+			case u.Scheme != "http" && u.Scheme != "https":
+				p.errf("EXPORT_ENDPOINT %q must be an http:// or https:// URL, got scheme %q", c.ExportEndpoint, u.Scheme)
+			case u.Host == "":
+				p.errf("EXPORT_ENDPOINT %q has no host", c.ExportEndpoint)
+			}
 		}
 	default:
 		p.errf("EXPORT_MODE %q is not one of file, http, stdout", c.ExportMode)
@@ -472,12 +495,27 @@ func (c *Config) SlogLevel() slog.Level {
 // at startup rather than rejected, because the operator may mean them.
 func (c *Config) Warnings() []string {
 	var w []string
+	if c.HasSASL() && !c.TLSEnabled {
+		// Legal, and occasionally deliberate on a trusted network, which is why
+		// this is a warning and not an error. It is still almost always a
+		// mistake: without TLS the SASL exchange itself is in the clear, so
+		// PLAIN puts the username and password on the wire verbatim for anything
+		// that can see the segment. SCRAM is named separately because operators
+		// reasonably believe it saves them here and it only half does -- it
+		// never sends the password itself, but an unencrypted channel leaves the
+		// exchange open to an active attacker in the path.
+		w = append(w, fmt.Sprintf("KAFKA_SASL_MECHANISM=%s with KAFKA_TLS_ENABLED=false: the SASL exchange is unencrypted, so PLAIN sends the username and password in the clear (SCRAM withholds the password but is still unprotected against an attacker in the path)",
+			c.SASLMechanism))
+	}
 	if c.CollectionTimeout > c.CollectionInterval {
 		w = append(w, fmt.Sprintf("COLLECTION_TIMEOUT (%s) exceeds COLLECTION_INTERVAL (%s): slow cycles will delay ticks",
 			c.CollectionTimeout, c.CollectionInterval))
 	}
 	if c.ExportMode != ExportModeHTTP && c.ExportEndpoint != "" {
 		w = append(w, fmt.Sprintf("EXPORT_ENDPOINT is set but EXPORT_MODE=%s, so it is ignored", c.ExportMode))
+	}
+	if c.ExportMode == ExportModeHTTP && isCleartextRemote(c.ExportEndpoint) {
+		w = append(w, "EXPORT_ENDPOINT is an http:// URL to a remote host: the API key in the X-API-Key header and the whole batch travel in cleartext")
 	}
 	if c.ExportMode == ExportModeFile && c.ExportFileMaxMB < 0 {
 		w = append(w, "EXPORT_FILE_MAX_MB is negative: file rotation is disabled and the file will grow without bound")
@@ -514,6 +552,26 @@ func (c *Config) Warnings() []string {
 			c.ThroughputWindow, c.CollectionInterval))
 	}
 	return w
+}
+
+// isCleartextRemote reports whether endpoint is plain http to somewhere other
+// than this machine. Loopback is excluded deliberately: the warning's whole
+// subject is credentials crossing a network, loopback crosses none, and the
+// repo's own local receiver is reached over it -- a warning that fires on the
+// project's documented development loop is a warning operators learn to skip.
+func isCleartextRemote(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme != "http" {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return false
+	}
+	return true
 }
 
 // HasSASL reports whether a complete SASL credential set was supplied. Load

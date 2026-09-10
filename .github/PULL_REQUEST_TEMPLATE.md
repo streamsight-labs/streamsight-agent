@@ -20,10 +20,11 @@ affected part of the batch.
 ### Does this change the ACL requirement?
 
 <!--
-The agent requires exactly DESCRIBE on CLUSTER, TOPIC and GROUP, never reads
-record data, and never writes to the cluster (see SECURITY.md). Answer "no", or
-stop here and open an issue -- a fourth grant is a product decision, not a
-review comment.
+The agent requires exactly five read-only grants -- DESCRIBE on CLUSTER, TOPIC
+and GROUP, plus DESCRIBE_CONFIGS on TOPIC and CLUSTER -- never reads record
+data, and never writes to the cluster (see SECURITY.md). Answer "no", or stop
+here and open an issue -- a sixth grant is a product decision, not a review
+comment.
 -->
 
 - [ ] No new Kafka permission is required.

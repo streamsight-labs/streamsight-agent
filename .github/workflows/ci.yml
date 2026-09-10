@@ -23,8 +23,18 @@ permissions:
 # A push to a branch that already has a PR would otherwise run this twice.
 # Keying on the branch name (not the ref) puts both events in one group, so
 # the newer run cancels the older.
+#
+# The group is qualified by the head repository because that collapse only has
+# meaning inside this repo. A fork's pushes never reach this workflow, so a fork
+# PR has no second event to fold away -- but it still reports `github.head_ref`
+# as a bare branch name, and a fork branches from `main` by default. Left
+# unqualified, every such PR lands in group `ci-main` next to a real push to
+# main and, with cancel-in-progress, kills it. That is CI griefing any stranger
+# can commit by accident, and it is reachable only once the repo is public. For
+# a same-repo PR the head repo is this repo, so the prefix equals the one the
+# push event computes and the original collapse still happens.
 concurrency:
-  group: ci-${{ github.head_ref || github.ref_name }}
+  group: ci-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:

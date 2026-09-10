@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 func readLines(t *testing.T, path string) []string {

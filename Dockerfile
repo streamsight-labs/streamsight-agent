@@ -25,7 +25,13 @@ ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/agent ./cmd/agent
 
-FROM alpine:3.19
+# A branch tag, not `latest` and not a digest: the patch level floats inside the
+# branch so a rebuild picks up the distribution's security fixes on its own,
+# while moving the branch stays a deliberate commit. The branch itself has to be
+# one Alpine still supports -- an end-of-life branch goes on building happily and
+# silently stops being patched, which is the failure this line is choosing
+# against. dependabot watches it.
+FROM alpine:3.24
 
 ARG VERSION=dev
 
@@ -42,6 +48,14 @@ RUN apk --no-cache add ca-certificates \
     && chown 1000:1000 /var/lib/streamsight
 
 COPY --from=builder /out/agent /usr/local/bin/agent
+
+# Every dependency compiled into that binary is BSD-3-Clause, and that
+# license's second clause requires a binary redistribution to reproduce the
+# copyright notices "in the documentation and/or other materials provided with
+# the distribution". A published image is such a redistribution, and it is one
+# nobody obtains by way of the repository, so the notices have to be inside it.
+# .dockerignore denies everything by default and allows this path back in.
+COPY THIRD_PARTY_NOTICES.txt /usr/local/share/streamsight-agent/
 
 # In file export mode the agent writes JSONL to EXPORT_FILE. The image default
 # points at a directory owned by uid 1000, because the process is not root and

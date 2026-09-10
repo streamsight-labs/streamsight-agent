@@ -1,11 +1,13 @@
 package export
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -15,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // decodeBatch reads a request body, transparently un-gzipping it.
@@ -576,4 +578,103 @@ func TestHTTPExporter_Backoff_FullJitter(t *testing.T) {
 	if d := e.backoff(40); d > maxBackoff {
 		t.Errorf("backoff(40) = %v, want <= %v", d, maxBackoff)
 	}
+}
+
+// safeBuffer is a bytes.Buffer a test goroutine and the export worker can both
+// touch: slog writes from the worker, the assertions read from the test.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// The exporter must log through the logger it was handed, not through
+// slog.Default(). Nothing in this program calls slog.SetDefault, so a
+// package-level slog.Warn here would ignore LOG_LEVEL in both directions: WARN
+// would print however high the level was set, and the two DEBUG lines an
+// operator debugging a wedged ingest most needs -- "retrying export" and
+// "export successful" -- could never print at all.
+func TestHTTPExporter_LogsThroughTheInjectedLogger(t *testing.T) {
+	newExporter := func(t *testing.T, level slog.Level, handler http.HandlerFunc) (*HTTPExporter, *safeBuffer) {
+		t.Helper()
+		server := httptest.NewServer(handler)
+		t.Cleanup(server.Close)
+
+		buf := &safeBuffer{}
+		e := NewHTTPExporter(HTTPExporterConfig{
+			Endpoint:   server.URL,
+			APIKey:     "test-key",
+			MaxRetries: 3,
+			BaseDelay:  time.Millisecond,
+			Logger:     slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: level})),
+		})
+		return e, buf
+	}
+
+	// One 500 then a 200, so the run produces both a WARN (the failed attempt)
+	// and both DEBUG lines (the retry and the success).
+	flaky := func() http.HandlerFunc {
+		var attempts atomic.Int32
+		return func(w http.ResponseWriter, r *http.Request) {
+			if attempts.Add(1) < 2 {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		}
+	}
+
+	t.Run("debug level reaches the retry and success lines", func(t *testing.T) {
+		e, buf := newExporter(t, slog.LevelDebug, flaky())
+		e.Export(context.Background(), &metrics.Batch{CollectedAt: time.Now()})
+		time.Sleep(200 * time.Millisecond)
+		e.Close()
+
+		got := buf.String()
+		for _, want := range []string{"retrying export", "export successful", "export failed"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("log missing %q at debug level, got:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("error level suppresses everything below it", func(t *testing.T) {
+		e, buf := newExporter(t, slog.LevelError, flaky())
+		e.Export(context.Background(), &metrics.Batch{CollectedAt: time.Now()})
+		time.Sleep(200 * time.Millisecond)
+		e.Close()
+
+		got := buf.String()
+		for _, unwanted := range []string{"retrying export", "export successful", "export failed"} {
+			if strings.Contains(got, unwanted) {
+				t.Errorf("log contains %q at error level, got:\n%s", unwanted, got)
+			}
+		}
+	})
+
+	// A terminal 4xx logs at ERROR, which must still arrive in the injected
+	// handler rather than on the default logger's stderr.
+	t.Run("error lines go to the injected handler", func(t *testing.T) {
+		e, buf := newExporter(t, slog.LevelError, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+		})
+		e.Export(context.Background(), &metrics.Batch{CollectedAt: time.Now()})
+		time.Sleep(200 * time.Millisecond)
+		e.Close()
+
+		if got := buf.String(); !strings.Contains(got, "ingest rejected batch") {
+			t.Errorf("terminal rejection did not reach the injected logger, got:\n%s", got)
+		}
+	})
 }

@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"kafka-metrics-agent/internal/collector"
-	"kafka-metrics-agent/internal/config"
-	"kafka-metrics-agent/internal/kafka"
-	"kafka-metrics-agent/internal/metrics"
+	"github.com/streamsight-labs/streamsight-agent/internal/collector"
+	"github.com/streamsight-labs/streamsight-agent/internal/config"
+	"github.com/streamsight-labs/streamsight-agent/internal/kafka"
+	"github.com/streamsight-labs/streamsight-agent/internal/metrics"
 )
 
 // signalCollector closes collected on its first Collect. Run installs its signal
