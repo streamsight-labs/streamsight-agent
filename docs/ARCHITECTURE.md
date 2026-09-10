@@ -1,8 +1,7 @@
 # Architecture
 
-How one collection cycle is built. The two overview diagrams — the component pipeline and
-the collection-phase ordering — are in [README.md](../README.md#how-it-works); this file is
-the level below them.
+How one collection cycle is built. The component pipeline is in
+[README.md](../README.md#how-it-works); this file is the level below it.
 
 ## Packages
 
@@ -65,6 +64,11 @@ API key under a different timestamp sentinel, so they need no permission the cha
 already need — but each costs a round trip, and issuing any of them earlier would inflate the
 very sample latency `topics_end` exists to pin down.
 
+`log_dirs`, `topic_configs`, `broker_configs`, `reassignments` and `epoch_probes` are the
+phases whose position does not affect correctness, and all five still wait for the
+end-offset sample, so an O(replicas) response, an O(topics) one, or a triggered fan-out
+never shares the wire with the rate-bearing high-watermark call.
+
 ### The wire order
 
 `sections[]` is emitted in **sample order**, and it is the same seventeen names on every
@@ -83,29 +87,17 @@ broker_rpc
 ```
 
 That list is `internal/collector/errors.go`'s constant block, exported as
-`collector.SectionNames()`, asserted against `canonicalSections` in `collector_test.go` and
-— since the ingest side had no binding to it and drifted once because of that — asserted
-again in `internal/mockingest/sections_test.go`, which requires `mockingest.DefaultSections`
-to equal it element for element, order included. There is no `authorized_operations` and no
-`group_states`: both sections were removed, and a required-section list carrying either would
-reject every batch this agent sends.
-
-`group_states` is worth naming once, because two unrelated things were spelled almost the
-same. The deleted one was a **section**: a second ticker polling `ListGroups` between cycles
-to time how long a group dwelt in each state. It came back non-functional against a real
-rebalance storm — 33 batches, 31 genuine member-set changes, two transitions observed and
-`Stable` on every sample — so rebalance detection now comes from member-set churn in
-`groups[].members[].member_id`, which already ships every batch at no extra request. What
-survives, and is not going anywhere, is `GROUP_STATES`: the broker-side **filter** passed to
-`ListGroups` as `StatesFilter`, a cardinality control that keeps filtered groups off the wire
-entirely. Different mechanism, different direction, same six letters.
+`collector.SectionNames()` and asserted against `canonicalSections` in `collector_test.go`
+and against `mockingest.DefaultSections` in `internal/mockingest/sections_test.go`, element
+for element, order included — see [TESTING.md](TESTING.md#1-unit-tests) for why the second
+binding exists. `GROUP_STATES` is not a section: it is the broker-side filter passed to
+`ListGroups` as `StatesFilter`, a cardinality control that keeps filtered groups off the
+wire entirely.
 
 Those arrows are not all alike, and the difference is what a capacity estimate turns on:
 
 * `log_dirs`, `topics_window`, `topic_configs` and `broker_configs` are **cadenced** — they
-  run on every Nth cycle whenever their phase is enabled, whatever the cluster is doing. The
-  two config sections share one cadence, one API key and one request shape, but not one ACL,
-  which is the whole reason they are two sections.
+  run on every Nth cycle whenever their phase is enabled, whatever the cluster is doing.
 * `reassignments` fires only when this batch's own `topics[]` contains an under-replicated
   partition, and `epoch_probes` only when a group's committed leader epoch disagrees with the
   partition's current one **and that exact question has not already been answered by a
@@ -195,12 +187,9 @@ ceiling rather than their cost. On Kafka 4.0+ the `ConsumerGroupDescribe` overla
 fourth.
 
 Seven of the seventeen sections add nothing to a healthy cluster at the defaults: four are
-opt-in and off (`topics_window`, `topics_local_start`, `topics_remote_end`, `share_groups`),
-two are triggered and silent (`reassignments`, `epoch_probes`), and one drains an accumulator
-(`broker_rpc`). All seven still ship a section every cycle. The last three carry no setting
-at all — nothing to trade, so nothing to configure — and `broker_rpc` is the only phase that
-adds meaningful bytes without adding a request; nothing the agent does issues a request
-*between* cycles.
+opt-in and off, two are triggered and silent, and one drains an accumulator. All seventeen
+still ship a section every cycle, `broker_rpc` is the only phase that adds meaningful bytes
+without adding a request, and nothing the agent does issues a request *between* cycles.
 
 kadm asks for metadata five times in a default cycle — once for the `cluster` section and
 once inside each of the four `List*Offsets`, which each begin with a `ListTopics` — and only
@@ -213,10 +202,6 @@ listings are then resolved against a topic set the `cluster` section never shipp
 half-interval is deliberate in the other direction too — at or above kgo's 5s default a cycle
 would issue no `Metadata` at all and ship a stale inventory under a fresh `sampled_at`. The
 only lever on any of this is `COLLECTION_INTERVAL`.
-
-One `ApiVersions` per broker is issued at startup only. It is cached for the client's
-lifetime, so the `GROUP_STATES` check, every optional phase's capability gate and the
-`cluster.capabilities` fingerprint on the wire all come out of that one probe.
 
 ## Cadence and concurrency notes
 
@@ -238,7 +223,7 @@ lifetime, so the `GROUP_STATES` check, every optional phase's capability gate an
   the defaults, which `TestCadencedPhasesNeverCoincide` proves by exhaustion over a full
   period. The price is that a phase first samples a few cycles in rather than on cycle 0 —
   max-timestamp on cycle 10, configs on cycle 355 — and the same property read the other way is
-  that a crash-looping agent no longer re-issues every expensive phase on every restart. The
+  that a crash-looping agent does not re-issue every expensive phase on every restart. The
   two config sections read one flag, `runCfg`, so they are always sampled together — a
   principal holding one grant and not the other sees the split, not a cadence skew.
 * Section errors are merged, deduplicated and capped once, after all phases have joined, on
@@ -252,7 +237,9 @@ lifetime, so the `GROUP_STATES` check, every optional phase's capability gate an
   epoch-probe suppression set (`probedEpochs`, bounded at 8192 keys and cleared wholesale
   when full — a periodic clean slate rather than an LRU whose eviction order would decide
   which partitions get re-probed). A restart re-asks every suppressed question once.
-* Capability gating happens once, at startup, from one cached `ApiVersions` probe per broker.
+* Capability gating happens once, at startup, from one `ApiVersions` probe per broker, cached
+  for the client's lifetime — the `GROUP_STATES` check, every optional phase's gate and the
+  `cluster.capabilities` fingerprint on the wire all come out of that one probe.
   Ten phases can be switched off by it — `agent.applyCapabilityGates` names them, and the log
   line for each says what the broker would have answered instead. Only `GROUP_STATES` fails
   startup rather than being disabled, because an unsupported state filter is dropped on
