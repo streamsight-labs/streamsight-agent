@@ -1,24 +1,21 @@
 # Contributing
 
-Small repo, one maintainer, short rules. Read them once and you will not need
-to come back. Behaviour in issues and reviews is covered by
-[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), which is the Contributor Covenant and
-holds no surprises.
+Small repo, one maintainer, short rules. Behaviour in issues and reviews is covered by
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), which is the Contributor Covenant and holds no
+surprises.
 
 ## Before you push
 
 ```bash
-make check          # gofmt -l, go vet, go test
+make check           # gofmt -l, go vet, go test
 go test -race ./...  # required, see below
 golangci-lint run    # config is .golangci.yml
 ```
 
-`-race` is not optional. The collector fans five goroutines out per cycle and
-joins them through channel closes, and the exporters share counters with a
-background worker — a data race here is a wrong number in a customer's
-dashboard, which is worse than a crash because nobody notices.
-
-CI runs the same gates. It is cheaper to find out locally.
+`-race` is not optional. The collector fans twelve goroutines out per cycle and joins them
+through channel closes, and the exporters share counters with a background worker — a data
+race here is a wrong number in a customer's dashboard, which is worse than a crash because
+nobody notices. CI runs the same gates; it is cheaper to find out locally.
 
 ## Commits
 
@@ -36,8 +33,6 @@ fix(collector): keep partial results when one broker shards out
 - **No attribution trailers.** No `Co-Authored-By:` for tooling, no
   `Generated with …`, no session links. `git log` is the change history, not a
   credits roll.
-
-The whole history follows this. `git log --oneline` is the reference.
 
 ## Code
 
@@ -71,11 +66,9 @@ The agent requires exactly five read-only grants: `DESCRIBE` on `CLUSTER`, on
 `TOPIC` and on `GROUP`, plus `DESCRIBE_CONFIGS` on `TOPIC` and on `CLUSTER`. It
 never reads record data and never writes to the cluster. That is not a
 description of the current implementation — it is the product, and it is what
-`SECURITY.md` promises to the people who decide whether this binary may run
-against their production Kafka. `DESCRIBE_CONFIGS` is read-only and is not
-`ALTER_CONFIGS`; it is in the set because `cleanup.policy` is the only thing that
-identifies a compacted topic, where consumer lag is otherwise overstated by an
-unknowable amount with nothing flagging it as unreliable.
+[SECURITY.md](SECURITY.md) promises to the people who decide whether this binary
+may run against their production Kafka. `DESCRIBE_CONFIGS` is read-only and is
+not `ALTER_CONFIGS`; why it is in the set is in [SECURITY.md](SECURITY.md).
 
 **A change that requires a sixth ACL is a product decision. Open an issue
 first.** It will not be merged as part of a feature PR, however good the
@@ -83,20 +76,11 @@ feature is. Two candidate collectors are already parked on exactly this
 question.
 
 If you are unsure whether a new Admin API call stays inside those grants,
-`test/` brings up a local KRaft cluster with SASL/SCRAM and `StandardAuthorizer`
-enforcing the three `DESCRIBE`s and nothing else:
-
-```bash
-make test-local-up
-make test-local-logs      # every section reports ok or skipped, except the two
-                          # config sections, which this environment deliberately
-                          # does not grant and which report unauthorized on the
-                          # cycles they sample
-make test-local-down
-```
-
-Revoking one grant and watching a single section turn `unauthorized` while the
-others stay `ok` is the fastest way to prove an attribution change works.
+`make test-local-up` brings up a KRaft cluster with SASL/SCRAM and
+`StandardAuthorizer` enforcing the three `DESCRIBE`s and nothing else — see
+[docs/TESTING.md](docs/TESTING.md#3-the-permission-model-sasl--acls). Revoking
+one grant and watching a single section turn `unauthorized` while the others
+stay `ok` is the fastest way to prove an attribution change works.
 `make test-local-urp` does the same for `reassignments`, which needs an
 under-replicated partition before it issues a request at all.
 
